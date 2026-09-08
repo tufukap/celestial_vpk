@@ -30,8 +30,6 @@ import { handleImportResult } from './views/library.js';
 import { loadCatalog } from './views/catalog.js';
 import { handlePresetImport } from './views/presets.js';
 import './views/settings.js';
-import './views/sources.js';
-import './views/projects.js';
 
 // A crash the user can't explain is the hardest kind to fix from a support chat. Both land
 // in the app's own log (see main.js diag:rendererError / src/diagnostics.js), so "it broke"
@@ -172,8 +170,7 @@ $('#globalSearch').addEventListener('input', (e) => {
   searchTimer = setTimeout(() => {
     state.search = e.target.value;
     $('#clearSearch').classList.toggle('hidden', !state.search);
-    if (state.view === 'sources') render();
-    else if (state.view !== 'catalog') switchView('catalog');
+    if (state.view !== 'catalog') switchView('catalog');
     else render();
   }, 180);
 });
@@ -181,7 +178,7 @@ $('#clearSearch').addEventListener('click', () => {
   $('#globalSearch').value = '';
   state.search = '';
   $('#clearSearch').classList.add('hidden');
-  if (state.view === 'catalog' || state.view === 'sources') render();
+  if (state.view === 'catalog') render();
 });
 
 // drag & drop of .vpk files anywhere in the window -> import
@@ -359,10 +356,6 @@ window.api.patch.onRepair((st) => {
   // language: settings.json is the source of truth; reconcile the localStorage-seeded value
   const cfg = await window.api.settings.get();
   state.settings = cfg;
-  if (cfg.previewProfile) {
-    $('#launchBtn').disabled = true;
-    $('.tb-sub').textContent = 'TEST PROFILE';
-  }
   state.favorites = new Set(Array.isArray(cfg.favorites) ? cfg.favorites : []);
   state.panels = readPanels(cfg.panels);
   applyContentZoom(Number(cfg.uiScale) || 1);

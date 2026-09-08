@@ -15,19 +15,6 @@ function getLang() {
 
 // English dictionary. Key = canonical Russian string with {n} placeholders.
 const EN = {
-  'Закрой Dota 2 перед установкой проекта': 'Close Dota 2 before installing the project',
-  'Выбери готовый ресурс': 'Choose a ready-to-use asset',
-  'Выбери папку с models, materials или другими ресурсами': 'Choose the folder containing models, materials or other assets',
-  'Импорт проекта': 'Import project', 'Экспорт проекта': 'Export project', 'Собрать VPK': 'Build VPK',
-  'Недопустимый путь ресурса: {0}': 'Invalid asset path: {0}',
-  'Неподдерживаемый ресурс: {0}': 'Unsupported asset: {0}',
-  'Неверный формат проекта': 'Invalid project format', 'Укажи название проекта': 'Enter a project name',
-  'Символические ссылки в проекте запрещены': 'Symbolic links are not allowed in projects',
-  'Превышен размер проекта или ресурса': 'Project or asset size limit exceeded',
-  'Ресурс изменён или повреждён': 'An asset has been changed or damaged',
-  'Путь уже есть в проекте: {0}': 'This path already exists in the project: {0}',
-  'Проект изменился. Открой его заново': 'The project changed. Open it again',
-  'Добавь хотя бы один ресурс': 'Add at least one asset',
   // ---- errors / dialogs (main.js) ----
   'Выбери папку game внутри dota 2 beta': 'Pick the "game" folder inside "dota 2 beta"',
   'В этой папке не найдена Dota 2 (нет подпапки dota)': 'No Dota 2 here (there is no "dota" subfolder)',
@@ -63,7 +50,6 @@ const EN = {
   'Выбери файл пресета (.d2mm)': 'Pick a preset file (.d2mm)',
   'сборка пресета': 'building preset',
   'В пресете нет модов': 'The preset has no mods',
-  'Пресет не найден': 'Preset not found',
   'Введи название пресета': 'Enter a preset name',
   'В пресете только свои моды — ссылка их не донесёт, отправь файлом':
     'The preset holds only your own mods — a link cannot carry them, send the file',
