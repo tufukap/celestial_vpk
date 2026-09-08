@@ -22,28 +22,6 @@ contextBridge.exposeInMainWorld('api', {
   catalog: {
     load: (force) => ipcRenderer.invoke('catalog:load', force),
   },
-  sources: {
-    list: () => ipcRenderer.invoke('sources:list'),
-    save: (input) => ipcRenderer.invoke('sources:save', input),
-    remove: (id) => ipcRenderer.invoke('sources:remove', id),
-    search: (query, force = false) => ipcRenderer.invoke('sources:search', query, force),
-    install: (selection) => ipcRenderer.invoke('sources:install', selection),
-  },
-  projects: {
-    list: () => ipcRenderer.invoke('projects:list'),
-    create: (input) => ipcRenderer.invoke('projects:create', input),
-    save: (input) => ipcRenderer.invoke('projects:save', input),
-    archive: (id, revision, archived) => ipcRenderer.invoke('projects:archive', id, revision, archived),
-    removeAsset: (id, revision, target) => ipcRenderer.invoke('projects:removeAsset', id, revision, target),
-    validate: (id) => ipcRenderer.invoke('projects:validate', id),
-    duplicate: (id) => ipcRenderer.invoke('projects:duplicate', id),
-    addFile: (id, revision, target) => ipcRenderer.invoke('projects:addFile', id, revision, target),
-    addFolder: (id, revision) => ipcRenderer.invoke('projects:addFolder', id, revision),
-    import: () => ipcRenderer.invoke('projects:import'),
-    export: (id) => ipcRenderer.invoke('projects:export', id),
-    build: (id) => ipcRenderer.invoke('projects:build', id),
-    install: (id) => ipcRenderer.invoke('projects:install', id),
-  },
   mods: {
     install: (payload) => ipcRenderer.invoke('mods:install', payload),
     list: () => ipcRenderer.invoke('mods:list'),

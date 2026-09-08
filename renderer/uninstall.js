@@ -39,7 +39,7 @@ async function main() {
   window.I18N_LANG = plan.lang === 'ru' ? 'ru' : 'en';
   document.documentElement.lang = window.I18N_LANG;
 
-  $('#title').textContent = L`Удалить Celestial VPK`;
+  $('#title').textContent = L`Удалить Dota 2 Mod Manager`;
   $('#sub').textContent = L`Программа будет удалена. Отметь, что забрать вместе с ней.`;
   $('#cancelBtn').textContent = L`Отмена`;
   $('#okBtn').textContent = L`Удалить`;
