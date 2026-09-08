@@ -1,29 +1,27 @@
 {
-  "name": "dota2-mod-manager",
-  "productName": "Dota 2 Mod Manager",
-  "version": "2.6.4",
-  "description": "Desktop mod manager for Dota 2 — browse, install, toggle and preset 1100+ cosmetic mods from the D2PFX catalog",
+  "name": "celestial-vpk",
+  "productName": "Celestial VPK",
+  "version": "0.1.0-beta.1",
+  "description": "Local Dota 2 mod projects, VPK builder and mod manager",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "start:preview": "node tools/workshop-preview.js",
+    "test:projects-ui": "node tools/projects-smoke.js",
     "dist": "electron-builder --win",
     "dist:linux": "electron-builder --linux",
     "test": "node --test \"test/**/*.test.js\"",
-    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=76 --test-coverage-branches=81 --test-coverage-functions=74 \"test/**/*.test.js\"",
     "sandbox:seed": "node tools/sandbox.js seed",
     "sandbox:reset": "node tools/sandbox.js reset",
     "sandbox:status": "node tools/sandbox.js status",
-    "start:sandbox": "electron . --user-data-dir=sandbox/userdata",
-    "docs": "node tools/gen-api-docs.js",
-    "docs:check": "node tools/gen-api-docs.js --check",
-    "aur": "node tools/gen-aur.js"
+    "start:sandbox": "electron . --user-data-dir=sandbox/userdata"
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/TheFleece/dota2-mod-manager.git"
   },
   "author": "Mykhailo Lynnyk",
-  "license": "GPL-3.0-or-later",
+  "license": "GPL-3.0",
   "homepage": "https://github.com/TheFleece/dota2-mod-manager",
   "devDependencies": {
     "electron": "^43.4.0",
@@ -34,8 +32,8 @@
     "electron-updater": "^6.3.9"
   },
   "build": {
-    "appId": "com.thefleece.dota2modmanager",
-    "productName": "Dota 2 Mod Manager",
+    "appId": "local.tufukap.celestialvpk",
+    "productName": "Celestial VPK",
     "icon": "build/icon.ico",
     "files": [
       "main.js",
@@ -51,7 +49,7 @@
     ],
     "protocols": [
       {
-        "name": "Dota 2 Mod Manager preset",
+        "name": "Celestial VPK preset",
         "schemes": [
           "d2mm"
         ]
@@ -60,7 +58,7 @@
     "fileAssociations": [
       {
         "ext": "d2mm",
-        "name": "Dota 2 Mod Manager preset",
+        "name": "Celestial VPK preset",
         "role": "Editor",
         "mimeType": "application/x-d2mm"
       }
@@ -71,10 +69,10 @@
         "portable"
       ],
       "icon": "build/icon.ico",
-      "artifactName": "Dota-2-Mod-Manager-Setup.${ext}"
+      "artifactName": "Celestial-VPK-Setup-${version}.${ext}"
     },
     "portable": {
-      "artifactName": "Dota-2-Mod-Manager-Portable.${ext}",
+      "artifactName": "Celestial-VPK-Portable-${version}.${ext}",
       "requestExecutionLevel": "user"
     },
     "linux": {
@@ -83,23 +81,18 @@
       ],
       "icon": "build/icon.png",
       "category": "Game",
-      "artifactName": "Dota-2-Mod-Manager.${ext}",
-      "synopsis": "Mods for Dota 2, without the file juggling"
+      "artifactName": "Celestial-VPK-${version}.${ext}",
+      "synopsis": "Create and manage local VPK mods for Dota 2"
     },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Dota 2 Mod Manager",
+      "shortcutName": "Celestial VPK",
       "deleteAppDataOnUninstall": false,
       "include": "build/installer.nsh"
     },
-    "publish": {
-      "provider": "github",
-      "owner": "TheFleece",
-      "repo": "dota2-mod-manager",
-      "releaseType": "release"
-    }
+    "publish": null
   }
 }

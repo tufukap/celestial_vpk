@@ -35,13 +35,14 @@ class Library {
     return this.data.installed.find((m) => m.id === id) || null;
   }
 
-  findByKey(categoryId, name, styleLabel) {
+  findByKey(categoryId, name, styleLabel, sourceId = 'd2pfx') {
     return this.data.installed.find(
       (m) => m.categoryId === categoryId && m.name === name && (m.styleLabel || null) === (styleLabel || null)
+        && (m.sourceId || 'd2pfx') === sourceId
     ) || null;
   }
 
-  add({ name, categoryId, styleLabel, fileRef, preview, files, kind, members }) {
+  add({ name, categoryId, styleLabel, fileRef, preview, files, kind, members, sourceId, sourceName, sourceModId }) {
     const id = crypto.randomUUID();
     const rec = {
       id,
@@ -56,6 +57,7 @@ class Library {
     };
     if (kind) rec.kind = kind;            // e.g. 'pack' — a combined multi-mod slot
     if (members) rec.members = members;   // pack members: [{ id, name, categoryId, enabled, ... }]
+    if (sourceId) Object.assign(rec, { sourceId, sourceName, sourceModId });
     this.data.installed.push(rec);
     this.save();
     return rec;
