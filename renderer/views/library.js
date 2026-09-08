@@ -89,6 +89,7 @@ function packRowHtml(rec, i, masterOff) {
   const open = packsOpen.has(rec.id);
   const members = rec.members || [];
   const onCount = members.filter((m) => m.enabled).length;
+  const langDir = (rec.files || []).find((f) => f.root === 'lang' && /_dir\.vpk$/i.test(f.relPath));
   return `
     <div class="lib-row pack-row ${rec.enabled ? '' : 'disabled'} ${selected ? 'selected' : ''}" data-row="${esc(rec.id)}" ${rec.slotIndex != null ? `data-order="${rec.slotIndex}"` : ''} style="--i:${Math.min(i, 20)}">
       ${gripHtml(rec)}
@@ -211,7 +212,7 @@ function normalRowHtml(rec, i, masterOff) {
         : libThumbHtml(rec, 'lib-thumb')}
       <div class="lib-info">
         <div class="lib-name">${esc(rec.name)}${rec.styleLabel ? ` <span class="lib-style-label">(${esc(rec.styleLabel)})</span>` : ''}${rec.match ? ` <span class="lib-tag match">${esc(matchLabel(rec.match))}</span>` : rec.info ? ` <span class="lib-tag">${esc(rec.info)}</span>` : ''}${schemaTagHtml(rec)}${coveredTagHtml(rec)}</div>
-        <div class="lib-meta"><span>${esc(catLabel)}</span>${pakFileHtml(rec)}</div>
+        <div class="lib-meta"><span>${esc(catLabel)}</span>${rec.sourceName ? `<span class="source-badge">${esc(rec.sourceName)}</span>` : ''}${pakFileHtml(rec)}</div>
       </div>
       <div class="lib-actions">
         ${isFontRec(rec)
@@ -1093,6 +1094,7 @@ async function bindLibrary(external) {
       const r = await window.api.mods.install({
         categoryId: rec.categoryId, name: rec.name, styleLabel: rec.styleLabel,
         fileRef: rec.fileRef, preview: rec.preview,
+        sourceId: rec.sourceId, sourceName: rec.sourceName, sourceModId: rec.sourceModId,
       });
       if (r.error) toast(`${rec.name}: ${r.error}`, 'error', 6000);
     }

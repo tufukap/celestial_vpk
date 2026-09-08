@@ -6,11 +6,13 @@
  * warranty whatsoever. LICENSE holds the terms; NOTICE holds the additional terms this
  * repository adds under section 7 of that License, about credit and the program's name.
  */
-const { app, BrowserWindow, ipcMain, shell, dialog, net, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const { execFile } = require('child_process');
+const AdmZip = require('adm-zip');
 
 let autoUpdater = null;
 try {
@@ -19,10 +21,14 @@ try {
 
 const { Settings } = require('./src/settings');
 const { Catalog } = require('./src/catalog');
+const { Sources } = require('./src/sources');
+const { Projects } = require('./src/projects');
+const { registerProjectsIpc } = require('./src/projects-ipc');
 const { Installer } = require('./src/installer');
 const { Library } = require('./src/library');
 const { Fingerprints } = require('./src/fingerprints');
-const { SCHEME } = require('./src/preset-link');
+const { writePresetFile, readPresetFile } = require('./src/preset-share');
+const { SCHEME, encodePresetLink, decodePresetLink } = require('./src/preset-link');
 const discordAuth = require('./src/discord-auth');
 const { DiscordPresence } = require('./src/discord-presence');
 const { findDotaGamePath, validateGamePath } = require('./src/steam');
@@ -35,25 +41,9 @@ const { createModIdentity } = require('./src/mod-id');
 const portableUpdater = require('./src/portable-update');
 const { gameStamp, createPatchWatcher } = require('./src/patch-watch');
 const { Icons } = require('./src/icons');
+const { buildReport, renderSummary, renderDetailed } = require('./src/diagnostics');
 const gamelang = require('./src/gamelang');
-const { isMinifyPak, isMinifyFile } = require('./src/minify');
-const { uninstallFlow } = require('./src/uninstall-window');
-const { presetsService } = require('./src/presets-service');
-const { registerPresetsIpc } = require('./src/ipc-presets');
-const { registerModsIpc } = require('./src/ipc-mods');
-const { registerLibraryIpc } = require('./src/ipc-library');
-const { registerPacksIpc } = require('./src/ipc-packs');
-const { registerWindowIpc } = require('./src/ipc-window');
-const { registerMiscIpc } = require('./src/ipc-misc');
-const { settingsViewFor } = require('./src/settings-view');
-const { registerSettingsIpc } = require('./src/ipc-settings');
-const { registerGameIpc } = require('./src/ipc-game');
-const { registerDiagnosticsIpc } = require('./src/ipc-diagnostics');
-
-/* Presets and sharing, wired once the services they use exist. Assigned in whenReady
- * below; every call site reads it late, which is the same lifetime the bare functions had
- * when they lived in this file. */
-let presets;
+const { readMinify, isMinifyPak, isMinifyFile } = require('./src/minify');
 const i18n = require('./src/i18n');
 const { t } = i18n;
 
@@ -83,7 +73,7 @@ const UNINSTALL_IS_UPDATE = process.argv.some((a) => /^(--updated|\/KEEP_APP_DAT
 const IS_UNINSTALL = process.argv.includes('--uninstall') && !UNINSTALL_IS_UPDATE;
 if (IS_PORTABLE) {
   try {
-    const beside = path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'Dota 2 Mod Manager Data');
+    const beside = path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'Celestial VPK Data');
     fs.mkdirSync(beside, { recursive: true });
     fs.accessSync(beside, fs.constants.W_OK);
     app.setPath('userData', beside);
@@ -91,7 +81,7 @@ if (IS_PORTABLE) {
 }
 
 let win;
-let settings, catalog, installer, library, fingerprints, presence, schemaService, icons, remoteConfig;
+let settings, catalog, sources, projects, installer, library, fingerprints, presence, schemaService, icons, remoteConfig;
 let toolchain, gameIcons, modPreviews, modId;
 let presenceView = 'catalog';
 // The folder mods are installed into, decided by the game's own audio language rather than
@@ -123,41 +113,12 @@ function clampZoom(v) {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
 }
 
-/* The window has to fit the screen it opens on.
- *
- * 1360x860 is the size this is designed at, and on a 1366x768 laptop - still one of the most
- * common screens there is - a window 860 tall does not fit a work area about 730 tall. Windows
- * places it anyway and the bottom of it sits under the taskbar or past the edge of the screen,
- * where the launch bar and the last rows of a list are. Nothing is broken and nothing scrolls
- * wrong; the part of the window holding them is simply not on the screen, which reads exactly
- * like a page that stops scrolling partway. A restart does not help, because the size is not
- * remembered from the last run - it is asked for again every time.
- *
- * Display scaling makes it worse rather than better: at 150% a 1080p screen reports a work area
- * around 1280x680, so a machine whose specification looks roomy has less room than the laptop.
- *
- * The minimums are clamped too. A minimum taller than the screen is not a floor, it is a
- * guarantee of the same overflow, and it takes away the one thing the person can do about it.
- */
-function windowFit() {
-  const fallback = { width: 1360, height: 860, minWidth: 1020, minHeight: 640 };
-  try {
-    const { width: aw, height: ah } = screen.getPrimaryDisplay().workAreaSize;
-    if (!(aw > 0 && ah > 0)) return fallback;
-    return {
-      width: Math.min(fallback.width, aw),
-      height: Math.min(fallback.height, ah),
-      minWidth: Math.min(fallback.minWidth, aw),
-      minHeight: Math.min(fallback.minHeight, ah),
-    };
-  } catch {
-    return fallback; // no display info: better the designed size than no window at all
-  }
-}
-
 function createWindow() {
   win = new BrowserWindow({
-    ...windowFit(),
+    width: 1360,
+    height: 860,
+    minWidth: 1020,
+    minHeight: 640,
     backgroundColor: '#050506',
     autoHideMenuBar: true,
     frame: false,
@@ -438,6 +399,8 @@ app.whenReady().then(async () => {
   settings = new Settings(userData);
   i18n.setLang(settings.get('uiLang'));
   catalog = new Catalog(userData);
+  sources = new Sources(userData, catalog);
+  projects = new Projects(userData);
   library = new Library(userData);
   fingerprints = new Fingerprints(userData);
   fingerprints.refresh(); // fire-and-forget: pull the latest fp -> mod map
@@ -581,14 +544,11 @@ app.whenReady().then(async () => {
   // Run by the uninstaller rather than by a person: ask what to take along, do it, and go.
   // Nothing below this point belongs to that - no catalog, no auto-update, no patch watcher.
   if (IS_UNINSTALL) {
-    uninstallFlow({
-      settings, library, installer, schemaService, diag, appRoot: __dirname,
-    }).open();
+    const w = createUninstallWindow();
+    registerUninstallIpc(w);
     diag('uninstall window up');
     return;
   }
-
-  presets = presetsService({ catalog, installer, library, schemaService, deployAndApply });
 
   registerIpc();
   // only the installed build claims the scheme — a dev run must not point the system's
@@ -616,6 +576,8 @@ app.whenReady().then(async () => {
 
 // ---- auto-update via GitHub Releases (packaged builds only) ----
 function setupAutoUpdate() {
+  // The development fork must never replace itself with an upstream release.
+  if (require('./package.json').name !== 'dota2-mod-manager') return;
   if (!autoUpdater || !app.isPackaged) return;
   // A portable exe cannot replace itself. electron-updater installs by handing the download
   // to the NSIS installer, and a portable build has none, so it would download 100 MB and
@@ -663,15 +625,15 @@ function installDesktopEntry() {
   const exe = process.env.APPIMAGE || process.execPath;
   try {
     const dir = path.join(app.getPath('home'), '.local', 'share', 'applications');
-    const file = path.join(dir, 'dota2-mod-manager.desktop');
+    const file = path.join(dir, 'celestial-vpk.desktop');
     const entry = [
       '[Desktop Entry]',
       'Type=Application',
-      'Name=Dota 2 Mod Manager',
-      'Comment=Mods for Dota 2, without the file juggling',
+      'Name=Celestial VPK',
+      'Comment=Create and manage local VPK mods for Dota 2',
       // %u passes the clicked link through; the quotes are for a path with a space in it
       `Exec="${exe}" %u`,
-      'Icon=dota2-mod-manager',
+      'Icon=celestial-vpk',
       'Categories=Game;',
       'Terminal=false',
       `MimeType=x-scheme-handler/${SCHEME};application/x-d2mm;`,
@@ -693,7 +655,7 @@ function installDesktopEntry() {
 // the Presets tab exactly like a dropped file, and the user decides.
 function handleDeepLink(url) {
   if (!url || !url.startsWith(`${SCHEME}://`)) return;
-  const res = presets.importPresetLink(url.replace(new RegExp(`^${SCHEME}://preset/`), ''));
+  const res = importPresetLink(url.replace(new RegExp(`^${SCHEME}://preset/`), ''));
   if (win && !win.isDestroyed()) {
     win.show();
     win.focus();
@@ -717,6 +679,145 @@ if (!app.requestSingleInstanceLock()) {
     handleDeepLink(firstLink(argv));
   });
   app.on('open-url', (e, url) => { e.preventDefault(); handleDeepLink(url); }); // macOS
+}
+
+/* ---------- being uninstalled ----------
+ *
+ * Removing the app used to leave everything it had done: the mods still in the game's
+ * language folder with nothing left to manage them, the app's folder with its settings,
+ * caches and the fifty-megabyte toolchain, and - if safe mode had been turned off -
+ * gameinfo_branchspecific.gi and dota.signatures still carrying our edit, with the one
+ * program that knows how to put them back now gone.
+ *
+ * The uninstaller therefore runs the app one last time (see build/installer.nsh) and this is
+ * what it runs: a window that asks what to take with it, and the work itself. Everything here
+ * goes through the same code the app uses day to day rather than deleting paths by hand, so
+ * a mod comes out the way removing it from the Library would, and the patch comes out the way
+ * the safe-mode switch would.
+ *
+ * Exit codes are the answer to the uninstaller: 3 means the person changed their mind and
+ * nothing should be removed at all, anything else means carry on.
+ */
+const UNINSTALL_CANCELLED = 3;
+const UNINSTALL_WIPE_DATA = 4;
+
+function folderSize(dir) {
+  let bytes = 0;
+  const walk = (at) => {
+    let names = [];
+    try { names = fs.readdirSync(at, { withFileTypes: true }); } catch { return; }
+    for (const e of names) {
+      const full = path.join(at, e.name);
+      if (e.isDirectory()) walk(full);
+      else { try { bytes += fs.statSync(full).size; } catch { /* vanished mid-walk */ } }
+    }
+  };
+  walk(dir);
+  return bytes;
+}
+
+/** What there is to remove, so the window can say it rather than ask in the abstract. */
+function uninstallPlan() {
+  const mods = library.list().filter((r) => r.categoryId !== 'cosmetic');
+  // installedSize takes one record: a disabled mod sits under .off and a pack under its own
+  // name, and only the installer knows where each of its files ended up
+  let modBytes = 0;
+  for (const rec of mods) {
+    try { modBytes += installer.installedSize(rec); } catch { /* removed by hand already */ }
+  }
+  return {
+    mods: mods.length,
+    modBytes,
+    patched: !!settings.get('schemaPatch'),
+    gamePath: settings.get('dotaGamePath') || null,
+    dataBytes: folderSize(app.getPath('userData')),
+    lang: settings.get('uiLang') === 'ru' ? 'ru' : 'en',
+  };
+}
+
+/* The app's own folder is not deleted here, though this is where it is decided.
+ *
+ * It is the folder this process is running out of: its log is open, so are Chromium's caches,
+ * and deleting around them leaves a scatter of locked files and an error on screen at the
+ * worst possible moment. The uninstaller can do it cleanly a second later, once this has
+ * exited, and it already knows how - so the answer travels back as the exit code and
+ * build/installer.nsh does the removing. */
+async function runUninstall({ revert, mods }) {
+  const errors = [];
+  // Order matters. The patch goes first because reverting reads the backups in the app's own
+  // folder, and mods go before that folder is wiped for the same reason: the manifest is the
+  // only record of which files in the game folder were ours.
+  if (revert && settings.get('schemaPatch')) {
+    try { schemaService.setEnabled(false); } catch (err) { errors.push(`patch: ${err.message || err}`); }
+  }
+  if (mods) {
+    for (const rec of [...library.list()]) {
+      try {
+        if (rec.kind === 'pack') installer.removePackFully(rec);
+        else installer.remove(rec.files, { recId: rec.id, deployed: rec.enabled !== false });
+        library.removeRecord(rec.id);
+      } catch (err) {
+        errors.push(`${rec.name}: ${err.message || err}`);
+      }
+    }
+  }
+  diag(`uninstall: revert=${revert} mods=${mods} errors=${errors.length}`);
+  return errors;
+}
+
+function createUninstallWindow() {
+  const w = new BrowserWindow({
+    width: 560,
+    height: 520,
+    resizable: false,
+    backgroundColor: '#050506',
+    autoHideMenuBar: true,
+    frame: false,
+    show: !process.env.MM_QUIET, // dev: see the note on the main window
+    webPreferences: {
+      preload: path.join(__dirname, 'preload-uninstall.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  w.loadFile(path.join(__dirname, 'renderer', 'uninstall.html'));
+  // dev: this window only ever opens from the uninstaller, so without a way to look at it
+  // it cannot be checked at all. Same MM_SHOT/MM_EVAL contract as the main window.
+  if (process.env.MM_SHOT) {
+    w.webContents.once('did-finish-load', () => setTimeout(async () => {
+      try {
+        if (process.env.MM_EVAL) {
+          const out = await w.webContents.executeJavaScript(`(async () => { ${process.env.MM_EVAL} })()`);
+          fs.writeFileSync(`${process.env.MM_SHOT}.eval.json`, JSON.stringify(out, null, 1));
+        }
+        fs.writeFileSync(process.env.MM_SHOT, (await w.webContents.capturePage()).toPNG());
+      } catch (e) {
+        fs.writeFileSync(process.env.MM_SHOT + '.err.txt', String(e));
+      }
+    }, 2500));
+  }
+  // closing the window is not an answer, so it counts as the safe one
+  w.on('closed', () => { if (!uninstallAnswered) app.exit(UNINSTALL_CANCELLED); });
+  return w;
+}
+
+let uninstallAnswered = false;
+
+function registerUninstallIpc(w) {
+  ipcMain.handle('uninstall:plan', () => uninstallPlan());
+  ipcMain.handle('uninstall:run', async (e, choices) => {
+    uninstallAnswered = true;
+    const errors = await runUninstall({ revert: !!choices?.revert, mods: !!choices?.mods });
+    return { ok: true, errors };
+  });
+  // The exit code is the whole answer to the uninstaller: whether to stop, and whether the
+  // app's folder goes with the program.
+  ipcMain.handle('uninstall:done', (e, wipeData) => {
+    uninstallAnswered = true;
+    app.exit(wipeData ? UNINSTALL_WIPE_DATA : 0);
+  });
+  ipcMain.handle('uninstall:cancel', () => { uninstallAnswered = true; app.exit(UNINSTALL_CANCELLED); });
+  ipcMain.handle('uninstall:close', () => { if (w && !w.isDestroyed()) w.close(); });
 }
 
 // register installer.importVpks/importVpkBuffers results into the library
@@ -860,6 +961,10 @@ async function importVpkBuffers(items) {
 
 // Whether toggling/removing this record can change what belongs in the built schema: a mod
 // with lifted item blocks, or a cosmetic pick (which IS a schema edit, not a file).
+function touchesSchema(rec) {
+  return rec.categoryId === 'cosmetic' || (Array.isArray(rec.schema) && rec.schema.length > 0);
+}
+
 // after any deploy, if the master switch is off, sweep freshly written files off too
 function afterDeployMaster() {
   try { if (installer.masterIsOff()) installer.setMasterEnabled(false); } catch { /* noop */ }
@@ -917,6 +1022,274 @@ function applyPresenceSetting() {
   if (settings.get('discordPresence') === false) { presence.stop(); return; }
   presence.start();
   refreshPresence();
+}
+
+// ---------- shared presets (.d2mm) ----------
+
+// where an imported .d2mm waits until the user installs it
+function sharedPresetFile(presetId) {
+  return path.join(app.getPath('userData'), 'shared-presets', `${presetId}.d2mm`);
+}
+
+function dropSharedPresetFile(preset) {
+  const f = preset && preset.source && preset.source.file;
+  if (f) { try { fs.rmSync(f, { force: true }); } catch { /* noop */ } }
+}
+
+// The mods of one catalog category. Most categories are a flat array, but some (creeps,
+// towers, hero-items, item-effects, creep-deny) group theirs under `groups` - the same two
+// shapes the catalog view walks (see categoryMods in renderer/app.js). Reading only the
+// flat ones meant every mod in a grouped category looked like it was not in the catalog:
+// the share dialog called them the user's own and packed them into the file as bytes, and
+// a preset link dropped them entirely.
+function categoryModList(data) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.groups)) return data.groups.flatMap((g) => g.mods || []);
+  return [];
+}
+
+// "<categoryId>|<name>|<styleLabel>" -> what mods:install needs to fetch it
+async function catalogIndex() {
+  const map = new Map();
+  const key = (c, n, s) => `${c}|${n}|${s || ''}`;
+  let data;
+  try { data = await catalog.load(); } catch { return map; } // offline with no cache
+  for (const [categoryId, list] of Object.entries((data.mods && data.mods.modsData) || {})) {
+    for (const m of categoryModList(list)) {
+      if (!m || !m.name) continue;
+      if (Array.isArray(m.styles)) {
+        for (const s of m.styles) {
+          map.set(key(categoryId, m.name, s.label), { categoryId, name: m.name, styleLabel: s.label, fileRef: s.file, preview: s.preview });
+        }
+      } else {
+        map.set(key(categoryId, m.name, null), { categoryId, name: m.name, styleLabel: null, fileRef: m.file, preview: m.preview });
+      }
+    }
+  }
+  map.lookup = (c, n, s) => map.get(key(c, n, s)) || null;
+  return map;
+}
+
+// How one library record travels: as a catalog identity when the catalog can hand it to
+// the receiver, otherwise as its own bytes. `loadData` is deferred so building the plan
+// (which only needs sizes) doesn't merge tens of MB per mod.
+function shareEntryFor(rec, cat) {
+  const hit = (!rec.sourceId || rec.sourceId === 'd2pfx') && rec.categoryId !== 'imported' && cat.lookup(rec.categoryId, rec.name, rec.styleLabel);
+  if (hit) {
+    return {
+      kind: 'catalog', categoryId: rec.categoryId, name: rec.name,
+      styleLabel: rec.styleLabel || null, fp: (installer.analyzeRecord(rec) || {}).fp || null, size: 0,
+    };
+  }
+  const hasVpk = (rec.files || []).some((f) => f.root === 'lang' && /_dir\.vpk$/i.test(f.relPath));
+  if (!hasVpk) {
+    return { kind: 'missing', name: rec.name, reason: t('нет в каталоге и нечего вложить') };
+  }
+  let size = 0;
+  try {
+    const lang = installer.langFolder();
+    for (const f of (rec.files || []).filter((x) => x.root === 'lang')) {
+      const p = ['', '.off', '.moff'].map((s) => path.join(lang, f.relPath) + s).find((x) => fs.existsSync(x));
+      if (p) size += fs.statSync(p).size;
+    }
+  } catch { /* size stays an estimate of 0 */ }
+  const a = installer.analyzeRecord(rec) || {};
+  return {
+    kind: 'embedded', name: rec.name, categoryId: rec.categoryId, info: a.info || '', fp: a.fp || null,
+    size, loadData: () => installer.mergeToSingleVpk(rec, rec.schema),
+  };
+}
+
+// A pack travels as its members: each one keeps its own identity, and the receiver's app
+// rebuilds the pack from them. Member VPKs are already sitting flattened in packsDir.
+function packShareEntry(rec, cat) {
+  const members = (rec.members || []).map((m) => {
+    const hit = (!m.sourceId || m.sourceId === 'd2pfx') && m.categoryId !== 'imported' && cat.lookup(m.categoryId, m.name, m.styleLabel);
+    if (hit) {
+      return { kind: 'catalog', categoryId: m.categoryId, name: m.name, styleLabel: m.styleLabel || null, fp: m.fp || null, size: 0 };
+    }
+    const src = installer.packMemberFile(rec.id, m.id);
+    if (!fs.existsSync(src)) return { kind: 'missing', name: m.name, reason: t('файл участника пака не найден') };
+    return {
+      kind: 'embedded', name: m.name, categoryId: m.categoryId, info: m.info || '', fp: m.fp || null,
+      size: fs.statSync(src).size, loadData: () => fs.readFileSync(src),
+    };
+  });
+  return { kind: 'pack', name: rec.name, members };
+}
+
+// Every mod of a preset, described the way it would be shared.
+async function presetShareEntries(preset) {
+  const cat = await catalogIndex();
+  const out = [];
+  for (const id of library.presetModIds(preset)) {
+    const rec = library.find(id);
+    if (!rec) continue;
+    out.push(rec.kind === 'pack' ? packShareEntry(rec, cat) : shareEntryFor(rec, cat));
+  }
+  return out;
+}
+
+// strips the deferred loaders so the plan can cross the IPC boundary; `key` is what the
+// renderer sends back to leave an oversized mod out of the file
+function planShape(entries) {
+  const plain = (e, key) => ({
+    key, kind: e.kind, name: e.name, size: e.size || 0, info: e.info || '', reason: e.reason || '',
+    ...(e.kind === 'cosmetic' ? { slot: e.slot } : {}),
+  });
+  return entries.map((e, i) => (e.kind === 'pack'
+    ? { ...plain(e, String(i)), members: e.members.map((m, j) => plain(m, `${i}.${j}`)) }
+    : plain(e, String(i))));
+}
+
+// fingerprint -> installed record id, so a shared mod already on disk isn't written twice
+function installedFpIndex() {
+  const map = new Map();
+  for (const rec of library.list()) {
+    if (rec.kind === 'pack') continue;
+    const a = installer.analyzeRecord(rec);
+    if (a && a.fp) map.set(a.fp, rec.id);
+  }
+  return map;
+}
+
+// The mods of a preset flattened for a link, plus the names of the ones that cannot ride
+// along. A link carries identities only, so a mod the receiver has no way to fetch — a
+// user's own import — has to be left out; the rest of the build still travels, and the
+// sender is told exactly what was dropped. Refusing to make a link at all over one import
+// is what made "share by link" look broken in a library that is mostly imports.
+//
+// A pack flattens to its members: packing is a local storage choice, not part of the build.
+// A cosmetic pick travels too — slot + item id is a few bytes, and needs no catalog lookup
+// at all (both players' games carry the same Valve schema).
+function presetLinkMods(preset, cat) {
+  const mods = [];
+  const skipped = [];
+  for (const id of library.presetModIds(preset)) {
+    const rec = library.find(id);
+    if (!rec) continue;
+    for (const it of (rec.kind === 'pack' ? rec.members || [] : [rec])) {
+      if ((it.sourceId && it.sourceId !== 'd2pfx') || it.categoryId === 'imported' || !cat.lookup(it.categoryId, it.name, it.styleLabel)) {
+        skipped.push(it.name);
+        continue;
+      }
+      mods.push({ kind: 'catalog', categoryId: it.categoryId, name: it.name, styleLabel: it.styleLabel || null });
+    }
+  }
+  return { mods, skipped };
+}
+
+// What installing a received preset would actually do, for the card in the Presets tab.
+async function sharedPresetStatus(preset, cat) {
+  const fpIndex = installedFpIndex();
+  const out = { installed: 0, download: 0, embedded: 0, free: 0, unavailable: [] };
+  const visit = (e) => {
+    if (e.kind === 'catalog') {
+      if (library.findByKey(e.categoryId, e.name, e.styleLabel)) out.installed++;
+      else if (cat.lookup(e.categoryId, e.name, e.styleLabel)) out.download++;
+      else out.unavailable.push(e.name);
+    } else if (e.kind === 'embedded') {
+      if (e.fp && fpIndex.has(e.fp)) out.installed++;
+      else out.embedded++;
+    } else if (e.kind === 'cosmetic') {
+      // free either way — nothing to fetch, just an instant pick from the local game schema
+      const have = library.list().find((r) => r.categoryId === 'cosmetic' && r.slot === e.slot && r.itemId === e.itemId);
+      if (have && have.enabled !== false) out.installed++;
+      else out.free++;
+    } else {
+      out.unavailable.push(e.name);
+    }
+  };
+  for (const e of preset.wanted || []) {
+    if (e.kind === 'pack') e.members.forEach(visit);
+    else visit(e);
+  }
+  return out;
+}
+
+// Build a fresh pack out of standalone records (the subset of packs:combine a received
+// preset needs — it never absorbs packs the user already has).
+function packFromRecords(name, recIds) {
+  const recs = recIds.map((id) => library.find(id)).filter(packableRecord);
+  if (recs.length < 2) return null; // nothing to save by packing — leave them standalone
+  const target = library.add({
+    name, categoryId: 'combined', styleLabel: null, fileRef: null, preview: null,
+    files: [], kind: 'pack', members: [],
+  });
+  fs.mkdirSync(installer.packFolder(target.id), { recursive: true });
+  for (const r of recs) {
+    target.members.push(installer.addPackMemberFromRecord(target.id, r, crypto.randomUUID()));
+    try { installer.remove(r.files); } catch { /* noop */ }
+    library.removeRecord(r.id);
+  }
+  deployAndApply(target);
+  return target;
+}
+
+// Validate a received .d2mm and park it in the Presets tab as a not-yet-installed preset.
+// Nothing is written into the game folder here — the user sees the contents first.
+function importPresetFile(filePath) {
+  try {
+    const { manifest } = readPresetFile(filePath);
+    if (!manifest.mods.length) return { error: t('В пресете нет модов') };
+    const preset = library.addSharedPreset({
+      name: manifest.name, note: manifest.note, author: manifest.author, wanted: manifest.mods,
+    });
+    // the archive has to survive until "Install": its embedded VPKs live nowhere else
+    const embeds = (e) => e.kind === 'embedded' || (e.kind === 'pack' && e.members.some((m) => m.kind === 'embedded'));
+    if (manifest.mods.some(embeds)) {
+      const dest = sharedPresetFile(preset.id);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(filePath, dest);
+      preset.source.file = dest;
+      library.save();
+    }
+    return { ok: true, preset };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+}
+
+// A pasted d2mm://preset/... link. Same landing as a file: it parks in the Presets tab as
+// a wish list and installs nothing until asked. No stash — a link has no payload to keep.
+function importPresetLink(text) {
+  try {
+    const decoded = decodePresetLink(text);
+    if (!decoded.mods.length) return { error: t('В пресете нет модов') };
+    const preset = library.addSharedPreset({
+      name: decoded.name, note: '', author: decoded.author, wanted: decoded.mods,
+    });
+    return { ok: true, preset };
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+}
+
+// enable exactly the preset's mods, disable everything else
+function applyPreset(preset) {
+  const wanted = new Set(library.presetModIds(preset));
+  const errors = [];
+  // Free cosmetics are not part of a build (see Library.inPreset): a preset that does not
+  // name somebody's courier is not asking for it to be taken off.
+  const recs = library.list().filter((r) => Library.inPreset(r));
+  let schemaTouched = false;
+  // off first, then on: two cursor sets cannot be live at once, so the outgoing one has to
+  // put the vanilla files back before the incoming one writes over them
+  for (const pass of [false, true]) {
+    for (const rec of recs) {
+      const shouldEnable = wanted.has(rec.id);
+      if (shouldEnable !== pass || rec.enabled === shouldEnable) continue;
+      try {
+        installer.setEnabled(rec.files, shouldEnable, rec.id);
+        library.setEnabled(rec.id, shouldEnable);
+        if (touchesSchema(rec)) schemaTouched = true;
+      } catch (err) {
+        errors.push(`${rec.name}: ${err.message}`);
+      }
+    }
+  }
+  if (schemaTouched) schemaService.refresh();
+  return errors;
 }
 
 // ---------- cursors ----------
@@ -999,6 +1372,12 @@ function reconcileCursors() {
 
 // a library record that can go into a combined pack: a lang-folder skin/import with a
 // _dir.vpk (not a pack itself, not a loose font/cursor set, not a terrain maps file)
+function packableRecord(rec) {
+  return rec && rec.kind !== 'pack'
+    && rec.categoryId !== 'fonts' && rec.categoryId !== 'cursors'
+    && (rec.files || []).some((f) => f.root === 'lang' && /_dir\.vpk$/i.test(f.relPath));
+}
+
 // Dota reads boot.vcfg once at startup and rewrites it on exit, so language changes must be
 // made while it is closed or the game would just overwrite them.
 //
@@ -1179,40 +1558,454 @@ async function repairAfterPatch(reason) {
 }
 
 function registerIpc() {
-  // ----- window controls ----- (src/ipc-window.js)
-  registerWindowIpc({
-    IS_PORTABLE, autoUpdater, clampZoom, diag, portableUpdate, portableUpdater,
-    releaseNotes, sendProgress, settings, win: () => win,
+  // ----- window controls -----
+  ipcMain.handle('win:minimize', () => win.minimize());
+  ipcMain.handle('win:maximize', () => {
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+    return win.isMaximized();
+  });
+  ipcMain.handle('win:close', () => win.close());
+  ipcMain.handle('win:isMaximized', () => win.isMaximized());
+
+  // ----- updates -----
+  // Portable copies cannot install over themselves (see src/portable-update.js). This puts the
+  // new build next to the current one and hands back where it landed, so the user closes this
+  // window and double-clicks that instead of visiting the site.
+  ipcMain.handle('update:fetchPortable', async () => {
+    if (!IS_PORTABLE) return { error: t('Это не портативная сборка') };
+    if (!portableUpdate) return { error: t('Обновления нет') };
+    try {
+      const got = await portableUpdater.fetchBeside(portableUpdate, {
+        onProgress: (loaded, total) => sendProgress({ type: 'download', label: `v${portableUpdate}`, loaded, total }),
+        log: diag,
+      });
+      sendProgress({ type: 'done', label: `v${portableUpdate}` });
+      diag(`portable update fetched: ${got.name}`);
+      return { ok: true, name: got.name, path: got.path, already: !!got.already };
+    } catch (err) {
+      sendProgress({ type: 'error', label: `v${portableUpdate}`, message: String(err.message || err) });
+      return { error: String(err.message || err) };
+    }
   });
 
-  // What the Settings screen is told, computed in src/settings-view.js. The two pieces of
-  // state it reads are handed over as functions, because both change while the app runs.
-  const settingsView = settingsViewFor({
-    settings,
-    library,
-    discordAuth,
-    validateGamePath,
-    langFolder: () => langFolder,
-    takeMigration: () => { const m = langMigration; langMigration = null; return m; },
+  ipcMain.handle('update:revealPortable', (e, filePath) => {
+    // only ever the file this app just wrote, next to the running exe
+    const dir = portableUpdater.portableDir();
+    if (!dir || path.dirname(path.resolve(filePath)) !== path.resolve(dir)) return { error: t('Файл не найден') };
+    shell.showItemInFolder(filePath);
+    return { ok: true };
   });
 
-  // ----- settings ----- (src/ipc-settings.js)
-  registerSettingsIpc({
-    applyPresenceSetting, catalog, discordAuth, findDotaGamePath, library, moveLangFolder,
-    presence, refreshPresence, settings, settingsView, validateGamePath,
-    langFolder: () => langFolder,
-    patchWatcher: () => patchWatcher,
-    setPresenceView: (v) => { presenceView = v; },
-    win: () => win,
+  ipcMain.handle('update:install', () => {
+    if (autoUpdater) autoUpdater.quitAndInstall();
+  });
+  ipcMain.handle('app:version', () => app.getVersion());
+
+  // What changed in the version now running. The app updates itself in the background, so
+  // without this a user is simply handed a different app one day and has to guess what
+  // moved — which is exactly what people ask about in Discord.
+  ipcMain.handle('app:notes', (e, lang) => {
+    const version = app.getVersion();
+    const seen = settings.get('lastSeenVersion');
+    return { version, notes: releaseNotes(version, lang), unseen: !!seen && seen !== version };
   });
 
-  // ----- install/manage ----- (src/ipc-mods.js)
-  registerModsIpc({
-    applyMasterToCursors, catalog, diag, disableOtherCursors, fingerprints, importVpkBuffers,
-    importVpkPaths, installer, isCursorRecord, library, refreshPresence, schemaService,
-    sendProgress, win: () => win,
-    // read late: Steam's verify rewrites this while the app is running
-    verifyStuck: () => verifyStuck,
+  ipcMain.handle('app:notesSeen', () => {
+    settings.set('lastSeenVersion', app.getVersion());
+    return { ok: true };
+  });
+
+  // ----- UI scale ----- (the renderer applies it; this only remembers it)
+  ipcMain.handle('ui:setZoom', (e, factor) => {
+    const z = clampZoom(factor);
+    settings.set('uiScale', z);
+    return { ok: true, uiScale: z };
+  });
+
+  // ----- settings -----
+  /**
+   * What the renderer means by "settings": the stored values plus the few facts about this
+   * machine that only the main process can answer.
+   *
+   * Both handlers return this, and that is the point. `settings:set` used to answer with the
+   * bare store, and the renderer caches whatever it is handed - so saving any single setting
+   * quietly dropped `dotaPathValid` from the screen's copy. Favouriting a mod was enough:
+   * from the next repaint the catalog claimed Dota was not installed and every install
+   * refused with "set the path first", until the app was restarted. The values were all
+   * correct; only the screen's idea of them was not.
+   */
+  const settingsView = ({ consumeMigration = false } = {}) => {
+    const game = settings.get('dotaGamePath');
+    const folders = gamelang.langFolders(game);
+    // Whose mods the game is actually going to read. Both managers name a language folder and
+    // Dota mounts exactly one, so this is a question with a definite answer - see src/minify.js.
+    const lang = game ? gamelang.detectLangSuffix(game) : { suffix: null, audio: null };
+    /* How many of the files in its folder are its own. Once both apps share one folder,
+     * counting everything there would report our mods as Minify's - and the answer has to be
+     * a fact about who wrote what, which is what the marker is for. */
+    const minifyModsIn = (suffix) => {
+      if (!suffix || !game) return 0;
+      try {
+        const dir = path.join(game, `dota_${suffix}`);
+        return fs.readdirSync(dir).filter((f) => {
+          const low = f.toLowerCase();
+          if (!/_dir\.vpk(\.off|\.moff)?$/.test(low)) return false;
+          return isMinifyFile(low) || isMinifyPak(path.join(dir, f));
+        }).length;
+      } catch {
+        return 0;
+      }
+    };
+    const minify = readMinify({
+      folders,
+      audio: lang.audio,
+      gameLanguages: gamelang.DOTA_LANGUAGES,
+      countMods: minifyModsIn,
+      ourFolder: langFolder,
+      ourMods: library.list().filter((r) => (r.files || []).some((f) => f.root === 'lang')).length,
+      // the whole launch line, not just its language: Minify's newer releases put a command of
+      // their own in front of the game there, and that is worth being able to name
+      launchOptions: game ? gamelang.launchOptions(game) : null,
+    });
+    // Only the screen asking for settings gets to hear about the migration, and only once.
+    // A save must not swallow the news before anybody has read it.
+    const migrated = consumeMigration ? langMigration : null;
+    if (consumeMigration) langMigration = null;
+    return {
+      ...settings.all(),
+      dotaPathValid: validateGamePath(game),
+      previewProfile: process.argv.includes('--workshop-preview'),
+      minify,
+      discordConfigured: discordAuth.isConfigured(),
+      // What is left of the language question, now that the folder is always dota_russian:
+      // whether the game agrees, and whether any mods are stranded outside it. Both are
+      // things to tell the user about, not things to ask them.
+      gameLang: {
+        mounted: lang.suffix,
+        /* A -language in Steam's launch options locks both language settings and decides the
+         * folder, so it overrules everything this app sets. Reported whatever its value,
+         * because even one that agrees with us today takes the choice of text language away
+         * from the player and breaks the moment either side changes. */
+        launchLang: lang.source === 'launch' ? lang.audio : null,
+        folder: langFolder,
+        /* Mods sitting in a folder the game does not mount - ours, left behind by a language
+         * change. Never another tool's: the screen offers to move these into our folder, and
+         * taking Minify's compiled pak out of the folder it just built it in would break its
+         * install to fix nothing. Its files are its business, and where they are is a thing
+         * to explain rather than to correct (see src/minify.js). */
+        stranded: folders
+          .filter((f) => f.suffix !== langFolder && f.modFiles > 0 && f.suffix !== minify.folder)
+          .map((f) => ({ suffix: f.suffix, modFiles: f.modFiles })),
+      },
+      langMigration: migrated,
+    };
+  };
+
+  ipcMain.handle('settings:get', () => settingsView({ consumeMigration: true }));
+
+  ipcMain.handle('settings:set', (e, key, value) => {
+    // keep main-process strings (dialogs, errors) in sync with the UI language
+    if (key === 'uiLang') i18n.setLang(value);
+    settings.set(key, value);
+    // the status text is localized, so a language change has to redraw it too
+    if (key === 'discordPresence' || key === 'uiLang') applyPresenceSetting();
+    return settingsView();
+  });
+
+  // ----- Discord presence -----
+  // the renderer tells us which tab is open; everything else comes from the library
+  ipcMain.handle('presence:view', (e, view) => {
+    presenceView = typeof view === 'string' ? view : 'catalog';
+    refreshPresence();
+  });
+
+  // ----- account (Discord) -----
+  ipcMain.handle('account:signIn', async () => {
+    try {
+      const account = await discordAuth.signIn();
+      settings.set('account', account);
+      if (win && !win.isDestroyed()) { win.show(); win.focus(); }
+      return { ok: true, account };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('account:signOut', () => {
+    settings.set('account', null);
+    return { ok: true };
+  });
+
+  // rescue mods sitting in a folder the game does not mount (our old dota_123, another
+  // tool's dota_minify, or whatever the audio language used to be)
+  ipcMain.handle('settings:moveLangFiles', (e, fromSuffix) => {
+    const game = settings.get('dotaGamePath');
+    if (!game) return { error: t('Путь к Dota 2 не задан') };
+    const moved = moveLangFolder(game, String(fromSuffix || ''), langFolder);
+    return { moved, to: langFolder };
+  });
+
+  ipcMain.handle('settings:detectDota', async () => {
+    const found = await findDotaGamePath();
+    if (found) {
+      settings.set('dotaGamePath', found);
+      // the watcher is holding handles on the folder that was current a moment ago
+      if (patchWatcher) patchWatcher.rearm();
+    }
+    return found;
+  });
+
+  ipcMain.handle('settings:browseDota', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: t('Выбери папку game внутри dota 2 beta'),
+      properties: ['openDirectory'],
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    let p = res.filePaths[0];
+    // allow picking "dota 2 beta" root as well
+    if (!validateGamePath(p) && validateGamePath(path.join(p, 'game'))) p = path.join(p, 'game');
+    if (!validateGamePath(p)) return { error: t('В этой папке нет файлов Dota 2 — нужна папка game внутри dota 2 beta') };
+    settings.set('dotaGamePath', p);
+    if (patchWatcher) patchWatcher.rearm();
+    return { path: p };
+  });
+
+  // ----- catalog -----
+  ipcMain.handle('catalog:load', async (e, force) => {
+    try {
+      if (!sources.list().find((source) => source.id === 'd2pfx').enabled) {
+        return { mods: { modsData: {} }, constants: { categories: [] }, guides: {} };
+      }
+      return await catalog.load({ forceRefresh: !!force });
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // ----- install/manage -----
+  const sourceCall = (fn) => async (_event, ...args) => {
+    try { return await fn(...args); } catch (err) { return { error: String(err.message || err) }; }
+  };
+  ipcMain.handle('sources:list', sourceCall(() => sources.list()));
+  ipcMain.handle('sources:save', sourceCall((input) => sources.save(input)));
+  ipcMain.handle('sources:remove', sourceCall((id) => sources.remove(id)));
+  ipcMain.handle('sources:search', sourceCall((query, force) => sources.search(query, { force: !!force })));
+  ipcMain.handle('sources:install', sourceCall(async (selection) => installCatalogPayload(await sources.resolve(selection))));
+  registerProjectsIpc({ ipcMain, dialog, window: () => win, projects,
+    install: async (build) => {
+      const stop = blocked('import');
+      if (await dotaIsRunning()) return { error: t('Закрой Dota 2 перед установкой проекта') };
+      return stop || importVpkBuffers(build());
+    },
+  });
+
+  ipcMain.handle('mods:install', (_event, payload) => installCatalogPayload(payload));
+  async function installCatalogPayload(payload) {
+    // payload: { categoryId, name, styleLabel, fileRef, preview }
+    const stop = blocked('install');
+    if (stop) return stop;
+    try {
+      const existing = library.findByKey(payload.categoryId, payload.name, payload.styleLabel, payload.sourceId);
+      if (existing) return { error: t('Уже установлено'), already: true };
+      // a cursor set is written straight over the one in resource\cursor, so the set that
+      // is on has to step aside first — otherwise its files are gone with no way back
+      const replaced = payload.categoryId === 'cursors' ? disableOtherCursors(null) : [];
+      const files = await installer.install({
+        categoryId: payload.categoryId,
+        modName: payload.name,
+        fileRef: payload.fileRef,
+        sourceId: payload.sourceId,
+      });
+      const rec = library.add({ ...payload, files });
+      // lift any item-schema changes out of the mod and rebuild the schema pak
+      const harvest = schemaService.harvest(rec);
+      if (harvest && harvest.deltas) schemaService.refresh();
+      // keep the set's own copy, so it can be switched back on later without a re-download
+      if (payload.categoryId === 'cursors') { try { installer.ensureCursorStore(rec.id, files); } catch { /* noop */ } }
+      // installed while the master switch is off? sweep the fresh file off too, so the
+      // library state stays consistent (all mods off) until the user turns them back on.
+      if (installer.masterIsOff()) {
+        try { installer.setMasterEnabled(false); } catch { /* noop */ }
+        applyMasterToCursors(false);
+      }
+      sendProgress({ type: 'done', label: payload.name });
+      return { ok: true, record: rec, replaced };
+    } catch (err) {
+      sendProgress({ type: 'error', label: payload.name, message: String(err.message || err) });
+      return { error: String(err.message || err) };
+    }
+  }
+
+  ipcMain.handle('mods:exportSingle', async (e, id) => {
+    const rec = library.find(id);
+    if (!rec) return { error: t('Мод не найден') };
+    try {
+      // a cursor set is loose files, not a pak — it travels as the zip the catalog uses
+      const cursor = isCursorRecord(rec);
+      const buf = cursor ? installer.cursorZip(rec) : installer.mergeToSingleVpk(rec, rec.schema);
+      const safe = rec.name.replace(/[<>:"/\\|?*]/g, '_') || 'mod';
+      const res = await dialog.showSaveDialog(win, {
+        title: cursor ? t('Сохранить курсор архивом') : t('Сохранить мод одним .vpk файлом'),
+        defaultPath: `${safe}.${cursor ? 'zip' : 'vpk'}`,
+        filters: [cursor
+          ? { name: t('Архив курсора'), extensions: ['zip'] }
+          : { name: t('VPK мод'), extensions: ['vpk'] }],
+      });
+      if (res.canceled || !res.filePath) return { cancelled: true };
+      fs.writeFileSync(res.filePath, buf);
+      return { ok: true, path: res.filePath, size: buf.length };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // The other half of "pack a folder": hand the author back the files themselves, so a mod
+  // can be opened, changed and dropped in again without any other tool.
+  ipcMain.handle('mods:unpackToFolder', async (e, id) => {
+    const rec = library.find(id);
+    if (!rec) return { error: t('Мод не найден') };
+    try {
+      const res = await dialog.showOpenDialog(win, {
+        title: t('Куда распаковать мод'),
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      if (res.canceled || !res.filePaths.length) return { cancelled: true };
+      const safe = rec.name.replace(/[<>:"/\\|?*]/g, '_') || 'mod';
+      const dest = path.join(res.filePaths[0], safe);
+      fs.mkdirSync(dest, { recursive: true });
+      const out = installer.unpackToFolder(rec, dest);
+      return { ok: true, path: dest, ...out };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('mods:importDialog', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: t('Выбери .vpk файлы модов или .zip с ними'),
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: t('Моды (.vpk, .zip)'), extensions: ['vpk', 'zip'] }],
+    });
+    if (res.canceled || !res.filePaths.length) return { cancelled: true };
+    return importVpkPaths(res.filePaths);
+  });
+
+  // folder picker — Windows can't offer files and folders in one dialog, so a pack that
+  // unzipped to a whole game tree (Skinchanger) gets its own entry point
+  ipcMain.handle('mods:importFolderDialog', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: t('Выбери папку с модами'),
+      properties: ['openDirectory'],
+    });
+    if (res.canceled || !res.filePaths.length) return { cancelled: true };
+    return importVpkPaths(res.filePaths);
+  });
+
+  ipcMain.handle('mods:importPaths', (e, paths) => importVpkPaths(Array.isArray(paths) ? paths : []));
+  ipcMain.handle('mods:importBuffers', (e, items) => importVpkBuffers(items));
+
+  ipcMain.handle('mods:list', () => {
+    // folder sync: a mod deleted straight from the game folder drops out of the library
+    try {
+      for (const rec of [...library.list()]) {
+        if (rec.kind === 'pack') {
+          if ((rec.files || []).length && !installer.langPrimaryPresent(rec)) {
+            installer.removePackFully(rec);
+            library.removeRecord(rec.id);
+          }
+        } else if (!installer.langPrimaryPresent(rec)) {
+          library.removeRecord(rec.id);
+        }
+      }
+    } catch { /* no game path yet — nothing to sync */ }
+
+    let external = [];
+    // fingerprint -> a mod already in the library, so a file that is byte-identical to
+    // something managed can be called what it is (a leftover copy) instead of a mystery
+    const installedFps = new Map();
+    try {
+      for (const rec of library.list()) {
+        if (rec.kind === 'pack') continue;
+        const a = installer.analyzeRecord(rec);
+        if (a && a.fp && !installedFps.has(a.fp)) installedFps.set(a.fp, rec.name);
+      }
+    } catch { /* no game path — nothing to compare against */ }
+    try {
+      const known = library.knownFiles();
+      const canMatch = fingerprints.hasData();
+      external = installer.externalFiles(known, { scanExtras: canMatch });
+      for (const f of external) {
+        if (!f.fp) continue;
+        f.match = fingerprints.match(f.fp); // recognise catalog mods
+        if (installedFps.has(f.fp)) f.duplicateOf = installedFps.get(f.fp);
+      }
+      // lang-root files are always worth listing; maps/cursor only when recognised
+      external = external.filter((f) => f.primary || f.match);
+      // fonts share panorama\fonts with vanilla — subset-match instead of a folder fp
+      if (canMatch && fingerprints.fonts.length && !known.some((f) => f.root === 'fonts')) {
+        const fh = installer.fontFolderHashes();
+        for (const m of (fh ? fingerprints.matchFonts(fh) : [])) {
+          external.push({
+            kind: 'font', key: `__font__${m.name}`, name: m.name, primary: false,
+            size: 0, enabled: true, files: Object.keys(m.files).map((bn) => ({ root: 'fonts', relPath: bn })),
+            match: [{ name: m.name, categoryId: m.categoryId, styleLabel: m.styleLabel || null }],
+          });
+        }
+      }
+    } catch { /* lang folder may not exist yet */ }
+    // imported mods have no catalog identity — tag them by content, match to catalog if known
+    const installed = library.list().map((rec) => {
+      if (rec.categoryId !== 'imported') return rec;
+      try {
+        const a = installer.analyzeRecord(rec) || {};
+        // fpOriginal: the file was repacked to drop the whole-game tables it shipped, so
+        // match on what it hashed to before that, or a recognised mod becomes unknown
+        const matches = fingerprints.match(rec.fpOriginal || a.fp);
+        // one-time: give bare "pakNN" imports a real name — the catalog name if the file
+        // is recognised, otherwise the content (hero / set / kind)
+        if (/^!?pak\d+$/i.test(rec.name)) {
+          const dir = rec.files.find((f) => f.root === 'lang' && /_dir\.vpk$/i.test(f.relPath));
+          const nm = (matches && matches[0] && matches[0].name) || (dir && installer.displayNameForFile(dir.relPath));
+          if (nm && nm !== rec.name) { library.update(rec.id, { name: nm }); rec.name = nm; }
+        }
+        return { ...rec, ...a, match: matches };
+      } catch { return rec; }
+    });
+    // Who is quietly covering whom. Both lists take part: a foreign file in the folder is
+    // mounted by the game exactly like a managed one, so leaving it out would name the wrong
+    // winner. Only switched-on mods, because a switched-off one is renamed and never mounted.
+    let covered = new Map();
+    try {
+      const live = [
+        ...installed.filter((r) => r.enabled).map((r) => ({ key: r.id, name: r.name, files: r.files })),
+        ...external.filter((f) => f.enabled).map((f) => ({ key: f.key, name: f.name, files: f.files })),
+      ];
+      covered = installer.coverage(live);
+    } catch { /* no game path — nothing is mounted, nothing covers anything */ }
+    external = external.map((f) => (covered.has(f.key) ? { ...f, coveredBy: covered.get(f.key) } : f));
+
+    let slots = 0;
+    try { slots = installer.usedModSlots(); } catch { /* no game path */ }
+    /* Leave a note on disk saying which files here are ours. This handler already reconciles
+     * the library against the folder and the renderer re-lists after every install, toggle,
+     * preset and bulk action, so it is the one place that keeps the note honest without
+     * hooking a dozen handlers - the same reason refreshPresence() sits here. */
+    try { installer.writeOwnership(library.knownLangRelPaths()); } catch (err) { diag(`ownership note skipped: ${err.message}`); }
+    // the renderer re-lists after every install, toggle, preset and bulk action, so this is
+    // the one place that keeps the Discord status honest without hooking a dozen handlers
+    refreshPresence();
+    // The lifted item blocks are only ever needed in the main process; the renderer just
+    // shows that a mod has them, and whether the patch that makes them work is on. Copies,
+    // never the stored records — dropping the field off those would erase it on save.
+    const schemaOn = schemaService.state().enabled;
+    const listed = installed.map((rec) => {
+      const by = covered.get(rec.id);
+      if (!Array.isArray(rec.schema)) return by ? { ...rec, coveredBy: by } : rec;
+      const { schema, ...rest } = rec;
+      return { ...rest, schemaCount: schema.length, schemaLive: schemaOn, ...(by ? { coveredBy: by } : {}) };
+    });
+    return { installed: listed, external, slots, slotCeil: 98, verifyStuck };
   });
 
   // ----- launch + master mods switch -----
@@ -1220,6 +2013,7 @@ function registerIpc() {
   // Launch Dota via Steam so the user's own launch options apply (-novid, -fps max,
   // -language russian … differ per user). rungameid mirrors clicking Play in Steam.
   ipcMain.handle('game:launch', () => {
+    if (process.argv.includes('--workshop-preview')) return { error: 'Preview profile: game launch is disabled' };
     // a Dota update wipes the search-path patch and moves the item table underneath our
     // build: the launch button is the last chance to notice before the game starts
     schemaService.heal();
@@ -1229,38 +2023,1065 @@ function registerIpc() {
 
   // ---------- item schema / search-path patch ----------
 
-  // ----- what the app was told from the network ----- (src/ipc-game.js)
-  registerGameIpc({
-    diag, dotaIsRunning, gameIcons, icons, library, modPreviews, remoteConfig, repairAfterPatch,
-    schemaService, settings, toolchain,
-    patchRepair: () => patchRepair,
-    setPatchRepair,
+  // ----- what the app was told from the network -----
+
+  // A switch is honoured here rather than in the renderer: this is the boundary an old
+  // window, a stale screen or a replayed click all have to come through.
+  const uiLang = () => (settings.get('uiLang') === 'ru' ? 'ru' : 'en');
+  const blocked = (name) => {
+    const f = remoteConfig.feature(name, uiLang());
+    return f.off ? { error: f.note || t('Эта возможность временно отключена') } : null;
+  };
+
+  ipcMain.handle('config:state', () => ({
+    features: Object.fromEntries(remoteConfig.SWITCHABLE.map((n) => [n, remoteConfig.feature(n, uiLang())])),
+    notices: remoteConfig.notices(uiLang()),
+    seen: settings.get('seenNotices') || [],
+  }));
+
+  ipcMain.handle('config:noticeSeen', (e, id) => {
+    const seen = new Set(settings.get('seenNotices') || []);
+    seen.add(String(id));
+    // an id list that only grows is a settings file that only grows
+    settings.set('seenNotices', [...seen].slice(-50));
+    return [...seen];
   });
 
-  // ----- managing what is installed ----- (src/ipc-library.js)
-  registerLibraryIpc({
-    applyMasterToCursors, catalog, disableOtherCosmetics, disableOtherCursors, fingerprints,
-    installer, isCursorRecord, library, refreshPresence, schemaService,
+  ipcMain.handle('patch:state', () => schemaService.state());
+
+  // what the app did about the last Dota patch (the banner in My mods asks on every visit;
+  // while the app is open it is pushed instead, see setPatchRepair)
+  ipcMain.handle('patch:repairState', () => patchRepair);
+  // "I closed the game, do it now" — the same path the retry timer takes
+  ipcMain.handle('patch:repairNow', async () => {
+    await repairAfterPatch('manual');
+    return patchRepair;
+  });
+  // the banner is news, not a state of the game: once it has been read it goes away
+  ipcMain.handle('patch:repairSeen', () => {
+    if (patchRepair.state === 'done' || patchRepair.state === 'failed') patchRepair = { state: 'idle' };
+    return patchRepair;
   });
 
-  // ----- combined packs ----- (src/ipc-packs.js)
-  registerPacksIpc({ afterDeployMaster, deployAndApply, installer, library });
-
-  // ----- presets ----- (src/ipc-presets.js)
-  registerPresetsIpc({
-    win: () => win, settings, catalog, installer, library, schemaService, presets,
-    adoptImportedFiles, afterDeployMaster, disableOtherCursors, sendProgress,
+  // The one moment the app touches files of the game install: gated on an explicit yes,
+  // reversible from the same switch, and every original is backed up in userData first.
+  ipcMain.handle('patch:setEnabled', async (e, enabled) => {
+    // turning it OFF is always allowed: a switch that traps people in the state it broke is
+    // worse than the problem it was flipped for
+    if (enabled) { const stop = blocked('cosmetics'); if (stop) return stop; }
+    if (!settings.get('dotaGamePath')) return { error: t('Путь к Dota 2 не задан') };
+    // the game holds gameinfo open while it runs, so writing it would fail half-way
+    if (await dotaIsRunning()) return { error: t('Закрой Dota 2 перед изменением файлов игры') };
+    try {
+      return schemaService.setEnabled(!!enabled);
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
   });
 
-  // ----- misc ----- (src/ipc-misc.js)
-  registerMiscIpc({ installer, library });
+  ipcMain.handle('schema:refresh', () => schemaService.refresh());
 
-  // ----- diagnostics ----- (src/ipc-diagnostics.js)
-  registerDiagnosticsIpc({
-    autoUpdater, catalog, diag, dotaIsRunning, icons, installer, library, logFile, remoteConfig,
-    schemaService, settings, toolchain,
-    win: () => win,
-    rendererErrors: () => rendererErrors,
-    lastUpdateError: () => lastUpdateError,
+  // Free cosmetics are generated from the installed game's own schema, so a weather or
+  // courier Valve ships later appears in the list without an app update.
+  ipcMain.handle('cosmetics:slots', () => schemaService.cosmeticSlots());
+
+  // One picture per tile, so opening a slot with 2000 items costs only what is on screen.
+  //
+  // A tile asks with a chain of sources, best first ("modart:pak54_dir.vpk|hero:Brewmaster"),
+  // and gets back the first one that has a picture. That is how "the mod's own art beats the
+  // wiki's portrait of the vanilla hero, but a raw model texture does not" stays written down
+  // in one place - renderer/ui/thumb.js, which composes the chain - instead of being spread
+  // across three. A plain name is simply a chain of one, which is what the picker sends.
+  //
+  // Sources: the mod's own files and the game's own pictures when the toolchain is here
+  // (exact, offline, no rate limit), the wiki for whatever is left.
+  ipcMain.handle('cosmetics:icons', async (e, names) => {
+    const wanted = (Array.isArray(names) ? names : []).slice(0, 60);
+    const chains = new Map(wanted.map((n) => [n, String(n).split('|').filter(Boolean)]));
+    const sources = [...new Set([...chains.values()].flat())];
+
+    const isMod = (s) => s.startsWith(modPreviews.VID) || s.startsWith(modPreviews.ART) || s.startsWith(modPreviews.TEX);
+    const found = {};
+    try {
+      Object.assign(found, await modPreviews.getMany(sources.filter(isMod)));
+    } catch (err) {
+      diag('mod previews failed, falling back to the usual pictures: ' + err.message);
+    }
+    const forIcons = sources.filter((s) => !isMod(s) && !found[s]);
+    if (forIcons.length) {
+      let fromGame = {};
+      try {
+        fromGame = await gameIcons.getMany(forIcons);
+      } catch (err) {
+        diag('game icons failed, falling back to the wiki: ' + err.message);
+      }
+      const left = forIcons.filter((n) => !fromGame[n]);
+      Object.assign(found, left.length ? await icons.getMany(left) : {}, fromGame);
+    }
+
+    const pictures = {};
+    for (const [key, chain] of chains) {
+      const hit = chain.find((s) => found[s]);
+      if (hit) pictures[key] = found[hit];
+    }
+    // A clip beats everything else a mod can be pictured by, but only the window can open
+    // one. So the answer also says where a frame is still worth taking: the tile shows
+    // whatever was found meanwhile, and swaps it for the frame when that arrives.
+    const decode = new Set();
+    for (const [, chain] of chains) {
+      const clip = chain.find((s) => s.startsWith(modPreviews.VID));
+      if (clip && !found[clip] && modPreviews.hasVideo(clip)) decode.add(clip);
+    }
+    return { pictures, decode: [...decode] };
+  });
+
+  // A mod that replaces a hero's animated portrait carries its own showcase, and a still out
+  // of it is the best picture of that mod there is. Decoding video is the window's job - the
+  // app is a browser and already has the decoder - so the bytes go there and the frame comes
+  // back to be judged and kept. That is why no ffmpeg is downloaded for this.
+  ipcMain.handle('preview:video', (e, key) => {
+    try {
+      const got = modPreviews.videoBytes(String(key || ''));
+      return got ? got.bytes : null;
+    } catch (err) {
+      diag('mod preview video failed: ' + err.message);
+      return null;
+    }
+  });
+
+  ipcMain.handle('preview:frame', (e, key, png) => {
+    try {
+      return modPreviews.saveFrame(String(key || ''), Buffer.from(png || []));
+    } catch (err) {
+      diag('mod preview frame failed: ' + err.message);
+      return null;
+    }
+  });
+
+  // ----- the Source 2 toolchain (Settings shows this) -----
+  ipcMain.handle('tools:state', () => ({ tools: toolchain.state(), iconCacheBytes: gameIcons.size() + modPreviews.size() }));
+
+  ipcMain.handle('tools:install', async (e, name) => {
+    try {
+      await toolchain.ensure(String(name || 'vrf'));
+      return { ok: true, tools: toolchain.state() };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('tools:remove', (e, name) => {
+    toolchain.remove(String(name || 'vrf'));
+    // the pictures it produced are only reachable through it
+    gameIcons.clear();
+    modPreviews.clear();
+    return { ok: true, tools: toolchain.state() };
+  });
+
+  // A pick is a library record like any other mod: mods:setEnabled/mods:remove already
+  // handle it (see touchesSchema above), this is only for the initial choice.
+  ipcMain.handle('cosmetics:pick', (e, slot, itemId, itemName) => {
+    const stop = blocked('cosmetics');
+    if (stop) return stop;
+    try {
+      const rec = schemaService.pickCosmetic(slot, itemId, itemName);
+      return { ok: true, record: rec };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('mods:masterState', () => {
+    try { return { off: installer.masterIsOff() }; } catch { return { off: false }; }
+  });
+
+  ipcMain.handle('mods:setMaster', (e, enabled) => {
+    try {
+      const r = installer.setMasterEnabled(!!enabled);
+      applyMasterToCursors(!!enabled);
+      refreshPresence();
+      return { ok: true, ...r };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('mods:setEnabled', (e, id, enabled) => {
+    const rec = library.find(id);
+    if (!rec) return { error: t('Мод не найден') };
+    try {
+      // only one cursor set — and only one look per cosmetic slot — can be live at a time
+      const replaced = enabled && isCursorRecord(rec) ? disableOtherCursors(id)
+        : enabled && rec.categoryId === 'cosmetic' ? disableOtherCosmetics(rec)
+          : [];
+      installer.setEnabled(rec.files, enabled, rec.id);
+      library.setEnabled(id, enabled);
+      if (touchesSchema(rec)) schemaService.refresh();
+      return { ok: true, replaced };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  /* Removing a selection is not the same as removing one mod N times.
+   *
+   * Every removal that touches the item table rebuilds the whole schema: the game's own
+   * 50 MB table read out of its pak, twenty-five thousand items spliced, a VPK built and
+   * written. That only has to be right once, at the end, so thirty mods used to pay for it
+   * thirty times - which is what made deleting a Skinchanger import feel like the app had
+   * hung. Deleting the files themselves was never the slow part: that is about two
+   * milliseconds each.
+   */
+  ipcMain.handle('mods:removeMany', (e, ids) => {
+    const errors = [];
+    let removed = 0;
+    let schemaTouched = false;
+    for (const id of Array.isArray(ids) ? ids : []) {
+      const rec = library.find(id);
+      if (!rec) continue;
+      try {
+        if (rec.kind === 'pack') installer.removePackFully(rec);
+        else installer.remove(rec.files, { recId: rec.id, deployed: rec.enabled !== false });
+        library.removeRecord(id);
+        if (touchesSchema(rec)) schemaTouched = true;
+        removed++;
+      } catch (err) {
+        errors.push(`${rec.name}: ${String(err.message || err)}`);
+      }
+    }
+    if (schemaTouched) schemaService.refresh();
+    return { ok: true, removed, errors };
+  });
+
+  // Same bargain for switching a selection on or off: one rebuild for the batch, not one
+  // per mod. Cursors and cosmetics are left out because only one of each can be live and
+  // the screen never offers them here.
+  ipcMain.handle('mods:setEnabledMany', (e, ids, enabled) => {
+    const errors = [];
+    let changed = 0;
+    let schemaTouched = false;
+    for (const id of Array.isArray(ids) ? ids : []) {
+      const rec = library.find(id);
+      if (!rec || rec.enabled === !!enabled) continue;
+      try {
+        installer.setEnabled(rec.files, !!enabled, rec.id);
+        library.setEnabled(id, !!enabled);
+        if (touchesSchema(rec)) schemaTouched = true;
+        changed++;
+      } catch (err) {
+        errors.push(`${rec.name}: ${String(err.message || err)}`);
+      }
+    }
+    if (schemaTouched) schemaService.refresh();
+    return { ok: true, changed, errors };
+  });
+
+  /* Who owns the map archive already sitting in the language folder.
+   *
+   * A terrain and a Minify map mod are the same file - maps/dota.vpk - because that is the
+   * name Dota reads. There is no slot to reserve and no way to keep both: installing one
+   * replaces the other. So the app asks this before it writes, and says whose work is about
+   * to go, rather than replacing it and letting the user find out in a match.
+   *
+   * Ours by the library, Minify's by the marker it packs into what it builds, and everything
+   * else unknown - a terrain installed by hand is somebody's too.
+   */
+  ipcMain.handle('mods:mapsOwner', () => {
+    try {
+      const dir = path.join(installer.langFolder(), 'maps');
+      if (!fs.existsSync(dir)) return { present: false };
+      const known = new Set(library.knownLangRelPaths().map((r) => String(r).replace(/\\/g, '/').toLowerCase()));
+      let unknown = null;
+      for (const f of fs.readdirSync(dir)) {
+        if (!/\.vpk$/i.test(f)) continue;
+        if (known.has(`maps/${f}`.toLowerCase())) continue;   // ours: replacing it is ordinary
+        if (isMinifyPak(path.join(dir, f))) return { present: true, owner: 'minify', file: f };
+        unknown = unknown || f;
+      }
+      return unknown ? { present: true, owner: 'unknown', file: unknown } : { present: false };
+    } catch {
+      return { present: false };
+    }
+  });
+
+  ipcMain.handle('mods:remove', (e, id) => {
+    const rec = library.find(id);
+    if (!rec) return { error: t('Мод не найден') };
+    try {
+      if (rec.kind === 'pack') installer.removePackFully(rec);
+      else installer.remove(rec.files, { recId: rec.id, deployed: rec.enabled !== false });
+      library.removeRecord(id);
+      if (touchesSchema(rec)) schemaService.refresh();
+      return { ok: true };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  /**
+   * Move a mod one step through the load order. The game mounts pakNN_dir.vpk in numeric
+   * order and the first copy of a file wins, so the pak number IS the priority - stepping
+   * up means trading slots with the mod directly above.
+   *
+   * This is the whole ordering story now. The app used to work out who covered whom by
+   * comparing what every mod ships and then offer to fix it, which was wrong often enough
+   * to be worse than useless: mods that merely share a stock file are not fighting, and no
+   * amount of filtering told the two cases apart reliably. Which mod wins is a decision
+   * only the person looking at the game can make.
+   */
+  ipcMain.handle('mods:move', (e, id, dir) => {
+    const rec = library.find(id);
+    if (!rec) return { error: t('Мод не найден') };
+    try {
+      const ordered = library.list()
+        .map((r) => ({ r, n: installer.slotNumber(r) }))
+        .filter((x) => x.n != null)
+        .sort((a, b) => a.n - b.n);
+      const at = ordered.findIndex((x) => x.r.id === id);
+      if (at === -1) return { error: t('У мода нет слота pakNN') };
+      const to = at + (dir < 0 ? -1 : 1);
+      if (to < 0 || to >= ordered.length) return { ok: true, moved: 0 };
+      const other = ordered[to].r;
+      for (const m of installer.swapSlots(rec, other)) library.update(m.id, { files: m.files });
+      return { ok: true, moved: 1, with: other.name };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  /**
+   * Put a mod at a given place in the load order.
+   *
+   * The arrows moved a mod one slot per press, which is fine for a nudge and absurd for the
+   * thing people actually want: a mod that has to load before thirty others took thirty
+   * presses. Dragging asks for a destination instead, and this walks the mod there.
+   *
+   * It walks with the same swap the arrows use rather than renumbering everything itself.
+   * A slot is a file name on disk, so every one of these steps renames real files in the
+   * game folder, and reusing the operation that has been doing that safely is worth more
+   * than saving a few renames. The order is re-read after each step because the swap is what
+   * changes it.
+   */
+  ipcMain.handle('mods:reorder', (e, id, toIndex) => {
+    const rec = library.find(id);
+    if (!rec) return { error: t('Мод не найден') };
+    const orderNow = () => library.list()
+      .map((r) => ({ r, n: installer.slotNumber(r) }))
+      .filter((x) => x.n != null)
+      .sort((a, b) => a.n - b.n);
+    try {
+      let ordered = orderNow();
+      let at = ordered.findIndex((x) => x.r.id === id);
+      if (at === -1) return { error: t('У мода нет слота pakNN') };
+      const to = Math.max(0, Math.min(ordered.length - 1, Math.trunc(Number(toIndex))));
+      let steps = 0;
+      while (at !== to && steps <= ordered.length) {
+        const step = to > at ? 1 : -1;
+        for (const m of installer.swapSlots(ordered[at].r, ordered[at + step].r)) {
+          library.update(m.id, { files: m.files });
+        }
+        ordered = orderNow();
+        at = ordered.findIndex((x) => x.r.id === id);
+        steps++;
+      }
+      return { ok: true, moved: steps };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('mods:externalSetEnabled', (e, fileName, enabled) => {
+    try {
+      const lang = installer.langFolder();
+      const abs = path.join(lang, fileName);
+      const base = fileName.replace(/\.off$/i, '');
+      const on = path.join(lang, base);
+      const off = on + '.off';
+      if (enabled && fs.existsSync(off)) fs.renameSync(off, on);
+      if (!enabled && fs.existsSync(on)) fs.renameSync(on, off);
+      return { ok: true };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('mods:externalRemove', (e, fileName) => {
+    try {
+      const lang = installer.langFolder();
+      const base = fileName.replace(/\.off$/i, '');
+      // the index alone leaves its data volumes behind as orphans the app then lists as
+      // more foreign files — take the whole set, in whatever on/off state each part is in
+      for (const rel of [base, ...installer.siblingParts(base)]) {
+        for (const suf of ['', '.off']) {
+          const abs = path.join(lang, rel + suf);
+          if (fs.existsSync(abs)) fs.rmSync(abs, { force: true });
+        }
+      }
+      return { ok: true };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // split a merged multi-hero library record into one managed mod per hero
+  ipcMain.handle('mods:splitMod', (e, id) => {
+    const rec = library.find(id);
+    if (!rec) return { error: t('Мод не найден') };
+    try {
+      if (!rec.files.some((f) => f.root === 'lang' && /_dir\.vpk$/i.test(f.relPath))) {
+        return { error: t('Нет _dir.vpk для разбора') };
+      }
+      // the service splits the files AND hands each part the item blocks that belong to it
+      const parts = schemaService.split(rec);
+      if (!parts || !parts.length) return { error: t('В файле меньше двух героев — разбирать нечего') };
+      if (parts.some((p) => Array.isArray(p.schema) && p.schema.length)) schemaService.refresh();
+      return { ok: true, count: parts.length, names: parts.map((p) => p.name) };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // adopt an imported record whose content matches a catalog mod: relabel it to that
+  // catalog identity so it's managed like a natively installed mod (no re-download)
+  ipcMain.handle('mods:adoptMod', (e, id, preview) => {
+    const rec = library.find(id);
+    if (!rec) return { error: t('Мод не найден') };
+    const a = installer.analyzeRecord(rec);
+    const matches = a && fingerprints.match(a.fp);
+    if (!matches) return { error: t('Совпадение с каталогом не найдено') };
+    const m = matches[0]; // identical-content entries are interchangeable; take the first
+    const fields = { name: m.name, categoryId: m.categoryId, styleLabel: m.styleLabel || null };
+    if (preview) fields.preview = preview; // catalog thumbnail resolved by the renderer
+    library.update(id, fields);
+    return { ok: true, name: m.name };
+  });
+
+  /**
+   * Take a file someone dropped into the game folder by hand into the library.
+   *
+   * Recognised as a catalog mod, it joins under that identity (preview, category, updates).
+   * Unrecognised, it still joins — as an import named after its content, exactly what
+   * dragging the same file onto the app would have produced. Refusing everything the
+   * fingerprint list had never seen is what left users with a nameless "external file" row
+   * and no way out of it; the catalog is a nice-to-have, not the price of admission.
+   */
+  ipcMain.handle('mods:adoptExternal', (e, fileName, preview) => {
+    try {
+      const lang = installer.langFolder();
+      const base = fileName.replace(/\.off$/i, '');
+      const onDisk = ['', '.off'].map((s) => path.join(lang, base + s)).find((p) => fs.existsSync(p));
+      if (!onDisk) return { error: t('Файл не найден в папке модов') };
+
+      const { fingerprintVpk, readVpkIndexFile } = require('./src/vpk');
+      let matches = null;
+      try { matches = fingerprints.match(fingerprintVpk(readVpkIndexFile(onDisk))); } catch { /* not a readable index */ }
+
+      // the _dir.vpk plus any sibling data archives (<base>_NNN.vpk) — one mod, several files
+      const files = [{ root: 'lang', relPath: base }];
+      for (const part of installer.siblingParts(base)) files.push({ root: 'lang', relPath: part });
+
+      const m = matches && matches[0]; // identical-content entries are interchangeable
+      const identity = m
+        ? { name: m.name, categoryId: m.categoryId, styleLabel: m.styleLabel || null, preview: preview || null }
+        : { name: installer.displayNameForFile(base) || base.replace(/_dir\.vpk$/i, ''), categoryId: 'imported', styleLabel: null, preview: null };
+      const rec = library.add({ ...identity, fileRef: fileName, files });
+      // A file dropped into the folder by something else has never been through an install,
+      // so its item blocks are still sitting inside it doing nothing. Adopting is the moment
+      // the app takes it over - lift them now, or the mod stays without its effects.
+      const harvest = schemaService.harvest(rec);
+      if (harvest && harvest.deltas) schemaService.refresh();
+      // a file that arrived switched off keeps that state, the way an imported mod would not
+      if (/\.off$/i.test(fileName)) library.setEnabled(rec.id, false);
+      return { ok: true, name: identity.name, matched: !!m };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // adopt a foreign font mod (its files present in panorama\fonts) as a catalog mod
+  ipcMain.handle('mods:adoptFont', (e, name, preview) => {
+    try {
+      const fh = installer.fontFolderHashes();
+      const m = fh && fingerprints.matchFonts(fh).find((x) => x.name === name);
+      if (!m) return { error: t('Совпадение с каталогом не найдено') };
+      library.add({ name: m.name, categoryId: m.categoryId, styleLabel: m.styleLabel || null, fileRef: m.name, preview: preview || null, files: Object.keys(m.files).map((bn) => ({ root: 'fonts', relPath: bn })) });
+      return { ok: true, name: m.name };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // adopt a foreign cursor set (resource\cursor) recognised as a catalog mod
+  ipcMain.handle('mods:adoptCursor', (e, preview) => {
+    try {
+      const cursorDir = path.join(installer.getGamePath(), 'dota', 'resource', 'cursor');
+      if (!fs.existsSync(cursorDir)) return { error: t('Папка курсора не найдена') };
+      const files = [];
+      const rels = [];
+      const walk = (d, pre) => {
+        for (const f of fs.readdirSync(d)) {
+          const full = path.join(d, f);
+          const rel = pre ? `${pre}/${f}` : f;
+          if (fs.statSync(full).isDirectory()) walk(full, rel);
+          else { files.push({ path: f.toLowerCase(), data: fs.readFileSync(full) }); rels.push(rel); }
+        }
+      };
+      walk(cursorDir, '');
+      const { fingerprintFiles } = require('./src/vpk');
+      const matches = fingerprints.match(fingerprintFiles(files));
+      if (!matches) return { error: t('Совпадение с каталогом не найдено') };
+      const m = matches[0];
+      const rec = library.add({ name: m.name, categoryId: m.categoryId, styleLabel: m.styleLabel || null, fileRef: m.name, preview: preview || null, files: rels.map((rp) => ({ root: 'cursor', relPath: rp })) });
+      // the set is on disk but not ours yet — keep a copy so it can be switched off and on
+      try { installer.ensureCursorStore(rec.id, rec.files); } catch { /* noop */ }
+      return { ok: true, name: m.name };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // split a merged multi-hero external file (placed in the game folder by another tool)
+  ipcMain.handle('mods:splitExternal', (e, fileName) => {
+    try {
+      const lang = installer.langFolder();
+      const base = fileName.replace(/\.off$/i, '');
+      const parts = installer.splitVpkFile(base);
+      if (!parts.length) return { error: t('В файле меньше двух героев — разбирать нечего') };
+      for (const p of parts) {
+        library.add({ name: p.name, categoryId: 'imported', styleLabel: null, fileRef: fileName, preview: null, files: p.files });
+      }
+      // delete the source _dir.vpk (and any multi-part data archives + .off variant)
+      const origBase = base.replace(/_dir\.vpk$/i, '');
+      for (const f of fs.readdirSync(lang)) {
+        const n = f.toLowerCase().replace(/\.off$/i, '');
+        if (n === base.toLowerCase() || new RegExp(`^${origBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}_\\d{3}\\.vpk$`, 'i').test(n)) {
+          fs.rmSync(path.join(lang, f), { force: true });
+        }
+      }
+      return { ok: true, count: parts.length, names: parts.map((p) => p.name) };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // ----- combined packs -----
+
+  // Combine any mix of standalone mods and existing packs into one pack. Packs are
+  // absorbed by moving their stored member VPKs into the target pack, so two packs (or a
+  // pack + mods) are effectively taken apart and rebuilt together into a single slot.
+  ipcMain.handle('packs:combine', (e, payload) => {
+    try {
+      const recs = (payload.modIds || []).map((id) => library.find(id)).filter(Boolean);
+      const packs = recs.filter((r) => r.kind === 'pack');
+      const mods = recs.filter((r) => packableRecord(r));
+      const totalMembers = packs.reduce((n, p) => n + (p.members ? p.members.length : 0), 0) + mods.length;
+      if (totalMembers < 2) return { error: t('Выбери минимум 2 мода (или пак и мод / два пака)') };
+
+      // reuse the first selected pack as the target (absorb the rest into it), else new
+      let target = packs[0];
+      const otherPacks = packs.slice(1);
+      if (!target) {
+        target = library.add({
+          name: (payload.name && payload.name.trim()) || t('Пак ({0})', totalMembers),
+          categoryId: 'combined', styleLabel: null, fileRef: null, preview: null, files: [], kind: 'pack', members: [],
+        });
+      } else if (payload.name && payload.name.trim()) {
+        target.name = payload.name.trim();
+      }
+      fs.mkdirSync(installer.packFolder(target.id), { recursive: true });
+
+      // standalone mods -> new members (their own deployment is removed)
+      for (const r of mods) {
+        target.members.push(installer.addPackMemberFromRecord(target.id, r, crypto.randomUUID()));
+        try { installer.remove(r.files); } catch { /* noop */ }
+        library.removeRecord(r.id);
+      }
+      // other packs -> move each stored member VPK into the target, then delete the pack
+      for (const p of otherPacks) {
+        for (const m of p.members || []) {
+          const src = installer.packMemberFile(p.id, m.id);
+          if (!fs.existsSync(src)) continue;
+          const newId = crypto.randomUUID();
+          fs.renameSync(src, installer.packMemberFile(target.id, newId));
+          target.members.push({ ...m, id: newId });
+        }
+        installer.removePackFully(p);
+        library.removeRecord(p.id);
+      }
+      const conflicts = deployAndApply(target);
+      return { ok: true, pack: library.find(target.id), conflicts };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // Add more library mods into an existing pack.
+  ipcMain.handle('packs:addMembers', (e, packId, modIds) => {
+    const pack = library.find(packId);
+    if (!pack || pack.kind !== 'pack') return { error: t('Пак не найден') };
+    try {
+      const recs = (modIds || []).map((id) => library.find(id)).filter(packableRecord);
+      if (!recs.length) return { error: t('Нет совместимых модов для добавления') };
+      for (const r of recs) {
+        pack.members.push(installer.addPackMemberFromRecord(pack.id, r, crypto.randomUUID()));
+        try { installer.remove(r.files); } catch { /* noop */ }
+        library.removeRecord(r.id);
+      }
+      const conflicts = deployAndApply(pack);
+      return { ok: true, pack: library.find(pack.id), added: recs.length, conflicts };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // Enable/disable one member inside a pack (rebuilds the merged VPK from enabled members).
+  ipcMain.handle('packs:setMemberEnabled', (e, packId, memberId, enabled) => {
+    const pack = library.find(packId);
+    if (!pack || pack.kind !== 'pack') return { error: t('Пак не найден') };
+    const m = (pack.members || []).find((x) => x.id === memberId);
+    if (!m) return { error: t('Мод в паке не найден') };
+    try {
+      m.enabled = !!enabled;
+      const conflicts = deployAndApply(pack);
+      return { ok: true, conflicts };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // Remove one member from a pack. If it was the last one, the pack itself is removed.
+  ipcMain.handle('packs:removeMember', (e, packId, memberId) => {
+    const pack = library.find(packId);
+    if (!pack || pack.kind !== 'pack') return { error: t('Пак не найден') };
+    const idx = (pack.members || []).findIndex((x) => x.id === memberId);
+    if (idx < 0) return { error: t('Мод в паке не найден') };
+    try {
+      try { fs.rmSync(installer.packMemberFile(pack.id, pack.members[idx].id), { force: true }); } catch { /* noop */ }
+      pack.members.splice(idx, 1);
+      if (!pack.members.length) {
+        installer.removePackFully(pack);
+        library.removeRecord(pack.id);
+        return { ok: true, removedPack: true };
+      }
+      deployAndApply(pack);
+      return { ok: true };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // Extract selected members out of a pack back into standalone deployed mods, keeping the
+  // rest of the pack intact (removes the pack entirely if nothing is left).
+  ipcMain.handle('packs:extractMembers', (e, packId, memberIds) => {
+    const pack = library.find(packId);
+    if (!pack || pack.kind !== 'pack') return { error: t('Пак не найден') };
+    try {
+      const ids = new Set(memberIds || []);
+      const names = [];
+      for (const m of (pack.members || []).filter((x) => ids.has(x.id))) {
+        const { files } = installer.deployMemberAsMod(pack, m);
+        const rec = library.add({ name: m.name, categoryId: m.categoryId || 'imported', styleLabel: m.styleLabel || null, fileRef: pack.name, preview: m.preview || null, files });
+        if (m.enabled === false) { try { installer.setEnabled(files, false); } catch { /* noop */ } library.setEnabled(rec.id, false); }
+        try { fs.rmSync(installer.packMemberFile(pack.id, m.id), { force: true }); } catch { /* noop */ }
+        names.push(m.name);
+      }
+      pack.members = (pack.members || []).filter((x) => !ids.has(x.id));
+      if (!pack.members.length) {
+        installer.removePackFully(pack);
+        library.removeRecord(pack.id);
+        afterDeployMaster();
+        return { ok: true, count: names.length, names, removedPack: true };
+      }
+      deployAndApply(pack);
+      return { ok: true, count: names.length, names };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // Disband a pack back into standalone mods (one deployed pak per member).
+  ipcMain.handle('packs:disband', (e, packId) => {
+    const pack = library.find(packId);
+    if (!pack || pack.kind !== 'pack') return { error: t('Пак не найден') };
+    try {
+      const names = [];
+      for (const m of pack.members || []) {
+        const { files } = installer.deployMemberAsMod(pack, m);
+        const rec = library.add({ name: m.name, categoryId: m.categoryId || 'imported', styleLabel: m.styleLabel || null, fileRef: pack.name, preview: m.preview || null, files });
+        if (m.enabled === false) { try { installer.setEnabled(files, false); } catch { /* noop */ } library.setEnabled(rec.id, false); }
+        names.push(m.name);
+      }
+      installer.removePackFully(pack);
+      library.removeRecord(pack.id);
+      afterDeployMaster();
+      return { ok: true, count: names.length, names };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // ----- presets -----
+  ipcMain.handle('presets:list', async () => {
+    const cat = await catalogIndex();
+    return Promise.all(library.listPresets().map(async (p) => {
+      // a received preset shows what installing it would cost before anything downloads
+      if (p.wanted) return { ...p, status: await sharedPresetStatus(p, cat).catch(() => null) };
+      // an own preset says how much of it a link could carry, so the button can explain
+      // itself instead of quietly disappearing
+      const { mods, skipped } = presetLinkMods(p, cat);
+      // A build names mods, not installations, so some of them may not be here right now.
+      // The screen shows the whole set and says which part of it is missing, rather than
+      // quietly listing the leftovers as if that were the build.
+      const members = library.presetMembers(p);
+      return {
+        ...p,
+        modIds: members.filter((m) => m.rec).map((m) => m.rec.id),
+        absent: members.filter((m) => !m.rec).map((m) => m.identity),
+        link: { count: mods.length, skipped },
+      };
+    }));
+  });
+  ipcMain.handle('presets:save', (e, name) => {
+    library.savePreset(name);
+    return library.listPresets();
+  });
+  // overwrite a preset with the current on/off state — the "save" the user actually means
+  // when they have tweaked a build they already named
+  ipcMain.handle('presets:update', (e, id) => {
+    const p = library.updatePresetMods(id);
+    if (!p) return { error: t('Пресет не найден') };
+    return { ok: true, count: (p.mods || []).length };
+  });
+
+  ipcMain.handle('presets:rename', (e, id, name) => {
+    const clean = String(name || '').trim().slice(0, 120);
+    if (!clean) return { error: t('Введи название пресета') };
+    if (!library.updatePreset(id, { name: clean })) return { error: t('Пресет не найден') };
+    return { ok: true, name: clean };
+  });
+
+  ipcMain.handle('presets:delete', (e, id) => {
+    dropSharedPresetFile(library.getPreset(id));
+    library.deletePreset(id);
+    return library.listPresets();
+  });
+  ipcMain.handle('presets:apply', (e, id) => {
+    const preset = library.getPreset(id);
+    if (!preset) return { error: t('Пресет не найден') };
+    const errors = applyPreset(preset);
+    return errors.length ? { error: errors.join('\n') } : { ok: true };
+  });
+
+  // ----- sharing presets as .d2mm -----
+
+  ipcMain.handle('presets:exportPlan', async (e, id) => {
+    const preset = library.getPreset(id);
+    if (!preset) return { error: t('Пресет не найден') };
+    try {
+      return { name: preset.name, entries: planShape(await presetShareEntries(preset)) };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('presets:export', async (e, id, opts) => {
+    const preset = library.getPreset(id);
+    if (!preset) return { error: t('Пресет не найден') };
+    const safe = preset.name.replace(/[<>:"/\\|?*]/g, '_') || 'preset';
+    const res = await dialog.showSaveDialog(win, {
+      title: t('Сохранить пресет для друга'),
+      defaultPath: `${safe}.d2mm`,
+      filters: [{ name: t('Пресет Mod Manager'), extensions: ['d2mm'] }],
+    });
+    if (res.canceled || !res.filePath) return { cancelled: true };
+    try {
+      const skip = new Set((opts && opts.skip) || []);
+      sendProgress({ type: 'stage', label: preset.name, stage: t('сборка пресета') });
+      // pull the bytes only now, and only for what the user kept ticked
+      const prep = (entry, key) => {
+        if (entry.kind === 'pack') return { ...entry, members: entry.members.map((m, j) => prep(m, `${key}.${j}`)) };
+        const { loadData, ...rest } = entry;
+        if (entry.kind !== 'embedded') return rest;
+        if (skip.has(key)) return { kind: 'missing', name: entry.name, reason: t('отправитель не вложил файл') };
+        return { ...rest, data: loadData() };
+      };
+      const entries = (await presetShareEntries(preset)).map((entry, i) => prep(entry, String(i)));
+      const written = writePresetFile(res.filePath, {
+        name: preset.name,
+        note: (opts && String(opts.note || '').slice(0, 600)) || '',
+        author: { name: (opts && String(opts.author || '').slice(0, 80)) || '' },
+        app: app.getVersion(),
+        catalogFetchedAt: catalog.cacheInfo().fetchedAt,
+      }, entries);
+      sendProgress({ type: 'done', label: preset.name });
+      return { ok: true, path: written.path, size: written.size };
+    } catch (err) {
+      sendProgress({ type: 'error', label: preset.name, message: String(err.message || err) });
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('presets:shareLink', async (e, id) => {
+    const preset = library.getPreset(id);
+    if (!preset) return { error: t('Пресет не найден') };
+    try {
+      const { mods, skipped } = presetLinkMods(preset, await catalogIndex());
+      if (!mods.length) return { error: t('В пресете только свои моды — ссылка их не донесёт, отправь файлом') };
+      const account = settings.get('account');
+      const link = encodePresetLink({ name: preset.name, author: account && account.username, mods });
+      return { ok: true, ...link, count: mods.length, skipped };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('presets:importDialog', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      title: t('Выбери файл пресета (.d2mm)'),
+      properties: ['openFile'],
+      filters: [{ name: t('Пресет Mod Manager'), extensions: ['d2mm'] }],
+    });
+    if (res.canceled || !res.filePaths[0]) return { cancelled: true };
+    return importPresetFile(res.filePaths[0]);
+  });
+
+  ipcMain.handle('presets:importFile', (e, filePath) => importPresetFile(filePath));
+
+  ipcMain.handle('presets:resolve', async (e, id) => {
+    const preset = library.getPreset(id);
+    if (!preset || !preset.wanted) return { error: t('Пресет не найден') };
+    const stash = preset.source && preset.source.file;
+    let bundle = null;
+    if (stash && fs.existsSync(stash)) {
+      try { bundle = readPresetFile(stash); } catch (err) { return { error: String(err.message || err) }; }
+    }
+    const cat = await catalogIndex();
+    const fpIndex = installedFpIndex();
+    const errors = [];
+    let schemaTouched = false;
+
+    // -> ids of the library records that now provide this mod (a multi-hero bundle splits
+    // into several), or an empty list when it could not be resolved at all
+    const resolveEntry = async (entry) => {
+      try {
+        if (entry.kind === 'catalog') {
+          const have = library.findByKey(entry.categoryId, entry.name, entry.styleLabel);
+          if (have) return [have.id];
+          const hit = cat.lookup(entry.categoryId, entry.name, entry.styleLabel);
+          if (!hit) { errors.push(`${entry.name}: ${t('нет в каталоге')}`); return []; }
+          if (hit.categoryId === 'cursors') disableOtherCursors(null); // one cursor at a time
+          const files = await installer.install({ categoryId: hit.categoryId, modName: hit.name, fileRef: hit.fileRef });
+          const rec = library.add({
+            categoryId: hit.categoryId, name: hit.name, styleLabel: hit.styleLabel,
+            fileRef: hit.fileRef, preview: hit.preview, files,
+          });
+          if (hit.categoryId === 'cursors') { try { installer.ensureCursorStore(rec.id, files); } catch { /* noop */ } }
+          return [rec.id];
+        }
+        if (entry.kind === 'embedded') {
+          if (entry.fp && fpIndex.has(entry.fp)) return [fpIndex.get(entry.fp)]; // already on disk
+          if (!bundle) { errors.push(`${entry.name}: ${t('файл пресета недоступен')}`); return []; }
+          sendProgress({ type: 'stage', label: entry.name, stage: t('установка') });
+          const files = installer.installVpkBuffer(bundle.readMod(entry.file));
+          // exactly the treatment a dragged-in file gets: the sender's item blocks lifted
+          // out, a multi-hero bundle split, a name from the content when theirs is a slot
+          const { records, schema } = adoptImportedFiles({ files, name: entry.name, fileRef: null });
+          if (schema) schemaTouched = true;
+          if (entry.fp && records.length === 1) fpIndex.set(entry.fp, records[0].id);
+          return records.map((r) => r.id);
+        }
+        if (entry.kind === 'cosmetic') {
+          const rec = schemaService.pickCosmetic(entry.slot, entry.itemId, entry.name);
+          return rec ? [rec.id] : [];
+        }
+        errors.push(`${entry.name}: ${entry.reason || t('нет в файле')}`);
+        return [];
+      } catch (err) {
+        errors.push(`${entry.name}: ${String(err.message || err)}`);
+        return [];
+      }
+    };
+
+    const ids = [];
+    for (const entry of preset.wanted) {
+      if (entry.kind === 'pack') {
+        const memberIds = [];
+        for (const m of entry.members) memberIds.push(...await resolveEntry(m));
+        const built = packFromRecords(entry.name, memberIds);
+        if (built) ids.push(built.id); else ids.push(...memberIds);
+      } else {
+        ids.push(...await resolveEntry(entry));
+      }
+    }
+
+    // the picks a sender's file asked for are made, but they do not join the build: from
+    // here this is an ordinary preset, and those hold mods only
+    const landed = [...new Set(ids)].map((id) => library.find(id)).filter((r) => Library.inPreset(r));
+    preset.mods = landed.map(Library.identityOf);
+    delete preset.modIds;
+    delete preset.wanted;                       // resolved: it's an ordinary preset now
+    if (preset.source) preset.source.file = null;
+    library.save();
+    if (stash) { try { fs.rmSync(stash, { force: true }); } catch { /* noop */ } }
+
+    errors.push(...applyPreset(preset));
+    // a mod that arrived already enabled never passes through applyPreset's own switch, so
+    // its freshly lifted blocks would sit in the library without ever reaching the build
+    if (schemaTouched) schemaService.refresh();
+    afterDeployMaster();
+    sendProgress({ type: 'done', label: preset.name });
+    return { ok: true, installed: preset.mods.length, errors };
+  });
+
+  // ----- misc -----
+  ipcMain.handle('misc:openLangFolder', () => {
+    try {
+      const lang = installer.langFolder();
+      fs.mkdirSync(lang, { recursive: true });
+      shell.openPath(lang);
+      return { ok: true };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle('misc:openToolsFolder', (e, sub) => {
+    const p = sub ? path.join(installer.toolsDir, sub) : installer.toolsDir;
+    shell.openPath(p);
+    return { ok: true };
+  });
+
+  ipcMain.handle('misc:openExternal', (e, url) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { ok: true };
+  });
+
+  ipcMain.handle('misc:cacheSize', () => installer.downloadCacheSize());
+  ipcMain.handle('misc:clearCache', () => {
+    installer.clearDownloadCache();
+    return { ok: true };
+  });
+
+  ipcMain.handle('misc:runTool', (e, toolDirName) => {
+    // find first exe inside the tool folder and launch it
+    try {
+      // The name has to be one of the tool folders this app installed and nothing else:
+      // joined unchecked, "../../.." pointed this at any folder on the disk, and what it
+      // does with a folder is run the first .exe in it.
+      const name = String(toolDirName || '');
+      const known = library.list().some((rec) => (rec.files || [])
+        .some((f) => f.root === 'tools' && f.relPath === name));
+      if (!known) return { error: t('Инструмент не найден') };
+      const dir = path.join(installer.toolsDir, name);
+      if (path.dirname(dir) !== path.resolve(installer.toolsDir)) return { error: t('Инструмент не найден') };
+      const findExe = (d) => {
+        for (const f of fs.readdirSync(d)) {
+          const full = path.join(d, f);
+          if (fs.statSync(full).isDirectory()) {
+            const r = findExe(full);
+            if (r) return r;
+          } else if (f.toLowerCase().endsWith('.exe')) {
+            return full;
+          }
+        }
+        return null;
+      };
+      const exe = findExe(dir);
+      if (!exe) return { error: t('exe не найден в папке инструмента') };
+      shell.openPath(exe);
+      return { ok: true };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
+  });
+
+  // ----- diagnostics -----
+  // fire-and-forget: a renderer crash it can't recover from still lands in the log a support
+  // report is built from, instead of vanishing with the window
+  ipcMain.on('diag:rendererError', (e, msg) => {
+    const text = String(msg || '').slice(0, 2000);
+    diag(`renderer: ${text}`);
+    // Kept apart from the log as well, because in the log they are twenty lines among two
+    // thousand. A report that lists them on their own is the difference between "the app
+    // does nothing when I click" and a stack trace.
+    rendererErrors.push({ at: new Date().toISOString(), text });
+    if (rendererErrors.length > 50) rendererErrors.shift();
+  });
+
+  /* One button, and inside the archive two reports written for two different readers.
+   *
+   * SUMMARY.txt is a screen of plain sentences that opens with whether anything is wrong at
+   * all, because whoever answers a support message first should not have to read JSON to find
+   * out that the game is not where the app thinks it is.
+   *
+   * REPORT.md is the same data with nothing left out, laid out to be read: every section, the
+   * full mod list in load order, the errors the interface reported. That is the one to hand
+   * to somebody who is going to work out what actually happened.
+   *
+   * report.json stays exactly as it was, for anything that wants the raw shape. Nothing about
+   * this changes for the user: the same button, the same zip, the same place to send it. */
+  ipcMain.handle('diag:export', async () => {
+    try {
+      const { report, files } = buildReport({
+        settings, library, installer, schemaService, catalog, icons,
+        app: {
+          version: app.getVersion(),
+          logFile: logFile(),
+          userDataDir: app.getPath('userData'),
+          updateError: lastUpdateError,
+        },
+        extra: {
+          dotaRunning: await dotaIsRunning(),
+          rendererErrors,
+          windows: BrowserWindow.getAllWindows().map((w) => {
+            const [width, height] = w.getSize();
+            return {
+              id: w.id, width, height,
+              visible: w.isVisible(), focused: w.isFocused(),
+              maximized: w.isMaximized(), minimized: w.isMinimized(),
+              url: w.webContents.getURL(),
+              zoom: w.webContents.getZoomFactor(),
+              crashed: w.webContents.isCrashed(),
+            };
+          }),
+          updater: { available: !!autoUpdater, lastError: lastUpdateError },
+          remoteConfig: (() => {
+            try {
+              return {
+                url: remoteConfig.url,
+                switches: Object.fromEntries(remoteConfig.SWITCHABLE.map((k) => [k, remoteConfig.feature(k)])),
+                notices: remoteConfig.notices(settings.get('uiLang') || 'en').length,
+              };
+            } catch (err) { return { error: String(err.message || err) }; }
+          })(),
+          toolchain: (() => {
+            try { return toolchain.installed(); } catch (err) { return { error: String(err.message || err) }; }
+          })(),
+        },
+      });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      // dev: MM_DIAG_OUT=<path> writes the archive straight there instead of asking. A report
+      // that can only be produced by a human clicking through a save dialog is a report nobody
+      // checks after changing it.
+      const res = process.env.MM_DIAG_OUT
+        ? { canceled: false, filePath: process.env.MM_DIAG_OUT }
+        : await dialog.showSaveDialog(win, {
+          title: t('Сохранить отчёт для поддержки'),
+          defaultPath: `dota2-mod-manager-diag-${stamp}.zip`,
+          filters: [{ name: t('Отчёт диагностики'), extensions: ['zip'] }],
+        });
+      if (res.canceled || !res.filePath) return { cancelled: true };
+      const zip = new AdmZip();
+      zip.addFile('SUMMARY.txt', Buffer.from(renderSummary(report), 'utf-8'));
+      zip.addFile('REPORT.md', Buffer.from(renderDetailed(report, files), 'utf-8'));
+      zip.addFile('report.json', Buffer.from(JSON.stringify(report, null, 2)));
+      for (const [name, text] of Object.entries(files)) zip.addFile(name, Buffer.from(text, 'utf-8'));
+      try { zip.addFile('manifest.json', fs.readFileSync(library.file)); } catch { /* nothing installed yet */ }
+      fs.writeFileSync(res.filePath, zip.toBuffer());
+      if (!process.env.MM_DIAG_OUT) shell.showItemInFolder(res.filePath);
+      return { ok: true, path: res.filePath };
+    } catch (err) {
+      return { error: String(err.message || err) };
+    }
   });
 }

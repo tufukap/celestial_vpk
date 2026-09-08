@@ -37,6 +37,39 @@ window.EN_PLURAL = {
 };
 
 const EN = {
+  'Удалить Celestial VPK': 'Remove Celestial VPK',
+  'Перечитать с диска': 'Reload from disk',
+  'Отбросить несохранённые изменения проекта?': 'Discard unsaved project changes?',
+  'Проекты': 'Projects', 'Новый проект': 'New project', 'Импорт проекта': 'Import project',
+  'Экспорт проекта': 'Export project', 'Поиск проектов': 'Search projects', 'Архив проектов': 'Archived projects',
+  'Описание проекта': 'Project description', 'Герой (заметка)': 'Hero (note)', 'Слот (заметка)': 'Slot (note)',
+  'Есть несохранённые изменения': 'Unsaved changes', 'Сохранено': 'Saved', 'Ревизия: {0}': 'Revision: {0}',
+  'Ресурсы проекта': 'Project assets', 'Путь ресурса': 'Asset path', 'Добавить файл': 'Add file',
+  'Добавить папку ресурсов': 'Add asset folder', 'Убрать из проекта': 'Remove from project',
+  'Добавь хотя бы один ресурс': 'Add at least one asset', 'Проверить проект': 'Validate project',
+  'Собрать VPK': 'Build VPK', 'Установить в Мои моды': 'Install to My mods', 'Создать копию': 'Duplicate',
+  'Вернуть из архива': 'Restore from archive', 'В архив': 'Archive', 'Проекты не найдены': 'No projects found',
+  'Создай свой первый проект': 'Create your first project', 'Файл сохранён: {0}': 'File saved: {0}',
+  'Убрать ресурс {0} из проекта?': 'Remove asset {0} from this project?',
+  'Проверка пройдена: {0} файлов': 'Validation passed: {0} files',
+  'Собрать проект и установить его в выбранную папку Dota 2?': 'Build this project and install it into the selected Dota 2 folder?',
+  'Не удалось установить проект': 'Could not install the project',
+  'Собери мод из готовых ресурсов Source 2. Проекты хранятся отдельно от игры; установка выполняется отдельной кнопкой.': 'Build a mod from ready-to-use Source 2 assets. Projects are stored separately from the game; installation is a separate action.',
+  'Путь внутри VPK, например materials/models/heroes/axe/axe_color.vtex_c. Модели, материалы и эффекты должны быть скомпилированы заранее.': 'Path inside the VPK, for example materials/models/heroes/axe/axe_color.vtex_c. Models, materials and effects must already be compiled.',
+  'До 512 файлов, 64 МиБ на файл и 128 МиБ на проект. Совпадающие пути нужно сначала удалить из списка.': 'Up to 512 files, 64 MiB per file and 128 MiB per project. Remove an existing path from the list before adding its replacement.',
+  'Проверка сверяет пути, размеры и целостность. Совместимость с героем, зависимости и отображение в игре проверяются отдельно.': 'Validation checks paths, sizes and integrity. Hero compatibility, dependencies and in-game appearance need separate testing.',
+  'Добавь название, затем готовые ресурсы. Сохрани ZIP для редактирования или собери VPK для установки.': 'Enter a name, then add ready-to-use assets. Save a ZIP for editing or build a VPK for installation.',
+  'Редактировать': 'Edit', 'Название': 'Name', 'Сохранить': 'Save', 'Категория': 'Category',
+  'Источники': 'Sources',
+  'Проверить и обновить': 'Check and refresh',
+  'Подключи JSON-каталог или GitHub-репозиторий с ZIP/VPK в релизах. Для другого формата сайта нужен отдельный адаптер.': 'Connect a JSON catalog or a GitHub repository with ZIP/VPK release assets. Other website formats need a dedicated adapter.',
+  'Выключен': 'Disabled', 'Не проверен': 'Not checked', 'Доступен': 'Available',
+  'Из кэша': 'Cached', 'Офлайн — сохранённая копия': 'Offline — cached copy', 'Недоступен': 'Unavailable',
+  'Добавить источник': 'Add source', 'Редактировать источник': 'Edit source',
+  'Тип источника': 'Source type', 'Адрес HTTPS': 'HTTPS address',
+  'Поиск по всем источникам': 'Search all sources', 'Все категории': 'All categories',
+  'Загрузка каталогов…': 'Loading catalogs…', 'Найдено модов: {0}': 'Mods found: {0}',
+  'Файл мода': 'Mod file', 'Нет ZIP/VPK': 'No ZIP/VPK', 'Мод установлен': 'Mod installed',
   // ---------- category names (CAT_RU) ----------
   'Герои': 'Heroes', 'Эффекты предметов': 'Item effects', 'Предметы героев': 'Hero items',
   'Фоны меню': 'Menu backgrounds', 'Курсоры': 'Cursors', 'Мега-килл': 'Mega-kill', 'Шейдеры': 'Shaders',
@@ -145,10 +178,10 @@ const EN = {
   // cosmetic slot labels
   'Погода': 'Weather', 'Ландшафт': 'Terrain', 'Интерфейс игры': 'Game HUD',
   'Экран загрузки': 'Loading screen', 'Экран противостояния': 'Versus screen',
-  'Курьер': 'Courier', 'Крипы Света': 'Radiant creeps',
+  'Курьер': 'Courier', 'Варды': 'Wards', 'Крипы Света': 'Radiant creeps',
   'Крипы Тьмы': 'Dire creeps', 'Осадные Света': 'Radiant siege creeps',
   'Осадные Тьмы': 'Dire siege creeps', 'Башни Света': 'Radiant towers',
-  'Башни Тьмы': 'Dire towers', 'Комментатор': 'Announcer',
+  'Башни Тьмы': 'Dire towers', 'Музыка': 'Music', 'Комментатор': 'Announcer',
   'Серия убийств': 'Kill streak',
   'Поиск модов…': 'Search mods…', 'Очистить': 'Clear', 'Свернуть': 'Minimize',
   'Развернуть': 'Maximize', 'Закрыть': 'Close', 'Поиск Dota 2…': 'Looking for Dota 2…',
@@ -186,7 +219,7 @@ const EN = {
 
   // ---------- dialogs / common ----------
   'Удалить': 'Delete', 'Отмена': 'Cancel', 'ОК': 'OK', 'Готово': 'Done',
-  'Пауза': 'Pause', 'Громкость': 'Sound', 'На весь экран': 'Fullscreen',
+  'Пауза': 'Pause', 'Звук': 'Sound', 'На весь экран': 'Fullscreen',
   'мод': 'mod',
 
   // ---------- launch + master switch (app.js) ----------
@@ -204,6 +237,7 @@ const EN = {
   'Категории': 'Categories',
   'Поиск:': 'Search:',
   'Ничего не найдено': 'Nothing found',
+  'Ничего не найдено — сбрось фильтры': 'Nothing found — reset the filters',
   'Установленные': 'Installed',
   'Смотреть превью': 'Watch preview',
   'Установлен': 'Installed',
@@ -294,6 +328,7 @@ const EN = {
     ' of {0} slots. The game won’t load more than ~99 separate paks — combine mods into one to fit more.',
   'Поиск в библиотеке…': 'Search the library…',
   'Импорт VPK': 'Import VPK',
+  'Папка модов': 'Mods folder',
   'Выбрать всё': 'Select all',
   'Отметь моды галочками — объединить в пак или массово управлять':
     'Tick mods to combine them into a pack or manage in bulk',
@@ -392,6 +427,7 @@ const EN = {
   'Пресет сохранён · {0} МБ': 'Preset saved · {0} MB',
   'В пресете нет модов': 'The preset has no mods',
   'получен': 'received',
+  'Установить': 'Install',
   '{0} уже стоят': '{0} already installed',
   '{0} скачать из каталога': '{0} to download from the catalog',
   '{0} внутри файла': '{0} inside the file',
@@ -446,7 +482,7 @@ const EN = {
   // ---------- tools ----------
   // the one-time offer on first run (renderer/ui/dialog.js, toolchainDialog)
   'Скачать Source 2 Viewer?': 'Download Source 2 Viewer?',
-  'Открытая программа (MIT) от ValveResourceFormat, не наша': 'An open-source program (MIT) by ValveResourceFormat, not ours',
+  'Открытая программа (MIT) от SteamDatabase, не наша': 'An open-source program (MIT) by SteamDatabase, not ours',
   'Дота хранит почти всё в сжатых форматах Source 2. Простую половину приложение читает само, а остальное разбирает эта программа.':
     'Dota keeps almost everything it draws in compiled Source 2 formats. The app reads the easy half itself; this program reads the rest.',
   'Превью твоих модов': 'Pictures of your own mods',
@@ -456,6 +492,7 @@ const EN = {
   '48 МБ, качается один раз в папку приложения. Удалить можно когда угодно в настройках, ничего сломано не будет.':
     '48 MB, downloaded once into the app\'s own folder. Remove it whenever you like in Settings; nothing breaks.',
   'Не сейчас': 'Not now',
+  'Скачать': 'Download',
   'Source 2 Viewer установлен — превью модов заработают': 'Source 2 Viewer installed — mod pictures will work now',
   'Не удалось скачать: {0}. Попробовать снова можно в настройках.':
     'Could not download it: {0}. Settings has the retry.',
@@ -605,16 +642,21 @@ const EN = {
   'не найден': 'not found',
   'Найти автоматически': 'Auto-detect',
   'Указать вручную': 'Set manually',
+  'Интерфейс': 'Interface',
   'Язык': 'Language',
   'Масштаб': 'Scale',
   'Мельче': 'Smaller',
   'Крупнее': 'Bigger',
   'Сбросить': 'Reset',
+  'Применить': 'Apply',
   'Перенести сюда': 'Move here',
   'Кэш загрузок': 'Download cache',
   'Размер': 'Size',
+  'Очистить': 'Clear',
+  'Каталог': 'Catalog',
   'Обновлён': 'Updated',
   'Обновить сейчас': 'Refresh now',
+  'Источник': 'Source',
   'О программе': 'About',
   'Версия': 'Version',
   'Dota 2 найдена: {0}': 'Dota 2 found: {0}',
@@ -636,6 +678,7 @@ const EN = {
   'Что нового': 'What\'s new',
   'свободная программа без каких-либо гарантий': 'free software with no warranty of any kind',
   'версия {0}': 'version {0}',
+  'Понятно': 'Got it',
   'Для этой версии заметок нет': 'No notes for this version',
 
   // ---------- progress + updates ----------

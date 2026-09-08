@@ -9,8 +9,9 @@ import { $ } from './dom.js';
 import { invalidateViews } from './router.js';
 
 /** How a mod is identified across the catalog and the library: category, name, style. */
-export function keyOf(categoryId, name, styleLabel) {
-  return `${categoryId}|${name}|${styleLabel || ''}`;
+export function keyOf(categoryId, name, styleLabel, sourceId) {
+  const prefix = sourceId && sourceId !== 'd2pfx' ? `${sourceId}|` : '';
+  return `${prefix}${categoryId}|${name}|${styleLabel || ''}`;
 }
 
 // label for a fingerprint match (array of catalog identities that share the content)
@@ -23,7 +24,7 @@ export function applyInstalled(installed) {
   state.installedIndex.clear();
   state.cosmeticPicks.clear();
   for (const rec of installed) {
-    state.installedIndex.set(keyOf(rec.categoryId, rec.name, rec.styleLabel), rec);
+    state.installedIndex.set(keyOf(rec.categoryId, rec.name, rec.styleLabel, rec.sourceId), rec);
     // What is live in a cosmetic slot is read from the records themselves, not from the
     // slot list: the option lists only change when the game does, while a pick can be
     // deleted or switched off from the Library at any moment.
